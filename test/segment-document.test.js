@@ -12,8 +12,7 @@ const document = {
   source_hash: 'sha256:a2bd8cf34bb65b2fec0602abd4096bc25147fa08257b785ed75dc502780bc723',
   lineage: {
     parser: 'text-native@1.0.0',
-    model: null,
-    stage: 'normalize'
+    model: null
   },
   created_at: '2026-01-01T00:00:00Z',
   retention: {
@@ -91,7 +90,10 @@ const policy = { max_segment_chars: 48 };
         bounding_box: null,
         char_span: [segment.start_offset, segment.end_offset]
       },
-      lineage: document.lineage,
+      lineage: {
+        ...document.lineage,
+        stage: 'chunk'
+      },
       citation: {
         label: document.source_label,
         ref: `[doc:${document.document_id}#seg${segment.segment_index}]`,
@@ -120,6 +122,13 @@ test('prefers sentence boundaries before safe fallback cuts', () => {
     'Seconda frase abbastanza',
     'lunga.'
   ]);
+});
+
+test('preserves the specified retention states and rejects unknown states', () => {
+  for (const state of ['active', 'tombstone', 'purged']) {
+    assert.doesNotThrow(() => segmentDocument({ ...document, retention: { ...document.retention, state } }, policy));
+  }
+  assert.throws(() => segmentDocument({ ...document, retention: { owner_id: 'synthetic-operator', state: 'pending_deletion' } }, policy), /retention\.state/);
 });
 
 test('rejects invalid public inputs before producing segments', () => {

@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 const HASH_PATTERN = /^sha256:[0-9a-f]{64}$/;
 const DOCUMENT_ID_PATTERN = /^urn:document:[A-Za-z0-9][A-Za-z0-9._~-]*$/;
 const OPAQUE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._~-]*$/;
-const RETENTION_STATES = new Set(['active', 'pending_deletion', 'deleted']);
+const RETENTION_STATES = new Set(['active', 'tombstone', 'purged']);
 const SENTENCE_ENDINGS = new Set(['.', '!', '?', '。', '！', '？']);
 const PUNCTUATION_BOUNDARIES = new Set([',', ';', ':', ')', ']', '}', '、', '。', '，', '；', '：']);
 
@@ -51,7 +51,6 @@ function validateDocument(document) {
   if (document.lineage.model !== null && typeof document.lineage.model !== 'string') {
     fail('document.lineage.model must be text or null');
   }
-  requireText(document.lineage.stage, 'document.lineage.stage');
   if (typeof document.created_at !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/u.test(document.created_at) || Number.isNaN(Date.parse(document.created_at))) {
     fail('document.created_at must be RFC3339');
   }
@@ -159,7 +158,7 @@ export function segmentDocument(document, policy) {
         lineage: {
           parser: document.lineage.parser,
           model: document.lineage.model,
-          stage: document.lineage.stage
+          stage: 'chunk'
         },
         citation: {
           label: document.source_label,
