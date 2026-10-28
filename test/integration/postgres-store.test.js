@@ -18,6 +18,19 @@ const document = {
 };
 const result = segmentDocument(document, { max_segment_chars: 80 });
 
+test('rejects malformed persistence input before connecting', async () => {
+  const storage = createStorage({ pool: { connect() { throw new Error('database must not be contacted'); } } });
+
+  await assert.rejects(
+    storage.saveDocumentAndSegments({ ...document, document_id: '/private/source.pdf' }, result),
+    /opaque document/
+  );
+  await assert.rejects(
+    storage.saveDocumentAndSegments({ ...document, retention: { owner_id: '../other-owner', state: 'active' } }, result),
+    /owner_id/
+  );
+});
+
 async function removeDocument(documentId, ownerId) {
   await pool.query('DELETE FROM documents WHERE document_id = $1 AND owner_id = $2', [documentId, ownerId]);
 }
@@ -35,6 +48,35 @@ integrationTest('stores and reads the complete segmented document contract', asy
 
   assert.deepEqual(stored, { ...document, segments: result.segments });
   await removeDocument(document.document_id, document.retention.owner_id);
+});
+
+integrationTest('rejects cross-owner replacement and preserves the original document', async () => {
+  const storage = createStorage({ pool });
+  const guardedDocument = {
+    ...document,
+    document_id: 'urn:document:postgres-owner-guard',
+    retention: { owner_id: 'synthetic-owner-guard', state: 'active' }
+  };
+  const guardedResult = segmentDocument(guardedDocument, { max_segment_chars: 80 });
+  const hostileDocument = {
+    ...guardedDocument,
+    retention: { owner_id: 'synthetic-owner-hostile', state: 'active' }
+  };
+
+  await removeDocument(guardedDocument.document_id, guardedDocument.retention.owner_id);
+  await storage.saveDocumentAndSegments(guardedDocument, guardedResult);
+
+  await assert.rejects(
+    storage.saveDocumentAndSegments(hostileDocument, segmentDocument(hostileDocument, { max_segment_chars: 80 })),
+    /owner/
+  );
+  assert.deepEqual(
+    await storage.getDocumentWithSegments(guardedDocument.document_id, guardedDocument.retention.owner_id),
+    { ...guardedDocument, segments: guardedResult.segments }
+  );
+  assert.equal(await storage.getDocumentWithSegments(guardedDocument.document_id, hostileDocument.retention.owner_id), null);
+
+  await removeDocument(guardedDocument.document_id, guardedDocument.retention.owner_id);
 });
 
 integrationTest('searches lexical matches with owner isolation and active retention', async () => {

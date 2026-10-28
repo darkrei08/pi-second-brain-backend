@@ -1,4 +1,9 @@
 const DEFAULT_SEARCH_LIMIT = 20;
+const DOCUMENT_ID_PATTERN = /^urn:document:[A-Za-z0-9][A-Za-z0-9._~-]*$/;
+const HASH_PATTERN = /^sha256:[0-9a-f]{64}$/;
+const OPAQUE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._~-]*$/;
+const RETENTION_STATES = new Set(['active', 'tombstone', 'purged']);
+const RFC3339_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/u;
 
 function requirePool(pool) {
   if (!pool || typeof pool.connect !== 'function') {
@@ -9,6 +14,63 @@ function requirePool(pool) {
 function requireText(value, name) {
   if (typeof value !== 'string' || value.trim().length === 0) {
     throw new TypeError(`${name} must be non-empty text`);
+  }
+}
+
+function requireObject(value, name) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new TypeError(`${name} must be an object`);
+  }
+}
+
+function validateDocumentAndResult(document, result) {
+  requireObject(document, 'document');
+  requireObject(result, 'result');
+  if (document.document_id !== result.document_id || !DOCUMENT_ID_PATTERN.test(document.document_id)) {
+    throw new TypeError('document and result must refer to the same opaque document');
+  }
+  requireText(document.text, 'document.text');
+  requireText(document.source_label, 'document.source_label');
+  if (/[/\\\u0000-\u001f\u007f]/u.test(document.source_label) || document.source_label !== document.source_label.trim() || document.source_label.includes('..')) {
+    throw new TypeError('document.source_label must be sanitized');
+  }
+  if (typeof document.source_hash !== 'string' || !HASH_PATTERN.test(document.source_hash)) {
+    throw new TypeError('document.source_hash must be a lowercase SHA-256 hash');
+  }
+  requireObject(document.lineage, 'document.lineage');
+  requireText(document.lineage.parser, 'document.lineage.parser');
+  if (document.lineage.model !== null) requireText(document.lineage.model, 'document.lineage.model');
+  if (typeof document.created_at !== 'string' || !RFC3339_PATTERN.test(document.created_at) || Number.isNaN(Date.parse(document.created_at))) {
+    throw new TypeError('document.created_at must be RFC3339');
+  }
+  requireObject(document.retention, 'document.retention');
+  if (typeof document.retention.owner_id !== 'string' || !OPAQUE_ID_PATTERN.test(document.retention.owner_id)) {
+    throw new TypeError('document.retention.owner_id must be opaque');
+  }
+  if (!RETENTION_STATES.has(document.retention.state)) {
+    throw new TypeError('document.retention.state is invalid');
+  }
+  if (result.source_hash !== document.source_hash || !Array.isArray(result.segments) || result.segments.length === 0) {
+    throw new TypeError('result must contain the document source hash and segments');
+  }
+  for (const [index, segment] of result.segments.entries()) {
+    requireObject(segment, `result.segments[${index}]`);
+    requireText(segment.id, `result.segments[${index}].id`);
+    if (segment.document_id !== document.document_id || segment.segment_index !== index) {
+      throw new TypeError('segments must be ordered for the document');
+    }
+    requireText(segment.text, `result.segments[${index}].text`);
+    if (!Number.isInteger(segment.start_offset) || !Number.isInteger(segment.end_offset) || segment.start_offset < 0 || segment.end_offset <= segment.start_offset) {
+      throw new TypeError('segment offsets must be ordered non-negative integers');
+    }
+    if (typeof segment.text_sha256 !== 'string' || !/^[0-9a-f]{64}$/u.test(segment.text_sha256)) {
+      throw new TypeError('segment.text_sha256 must be lowercase SHA-256 hex');
+    }
+    requireObject(segment.metadata, `result.segments[${index}].metadata`);
+    requireObject(segment.provenance, `result.segments[${index}].provenance`);
+    if (segment.provenance.segment_id !== segment.id || segment.provenance.source_hash !== document.source_hash) {
+      throw new TypeError('segment provenance does not match the document');
+    }
   }
 }
 
@@ -58,14 +120,12 @@ export function createStorage({ pool }) {
 
   return {
     async saveDocumentAndSegments(document, result) {
-      if (!document || !result || document.document_id !== result.document_id) {
-        throw new TypeError('document and result must refer to the same document');
-      }
+      validateDocumentAndResult(document, result);
 
       const client = await pool.connect();
       try {
         await client.query('BEGIN');
-        await client.query(`
+        const upsert = await client.query(`
           INSERT INTO documents (
             document_id, text, source_label, source_hash, lineage,
             created_at, owner_id, retention_state
@@ -79,6 +139,7 @@ export function createStorage({ pool }) {
             created_at = EXCLUDED.created_at,
             owner_id = EXCLUDED.owner_id,
             retention_state = EXCLUDED.retention_state
+          WHERE documents.owner_id = EXCLUDED.owner_id
         `, [
           document.document_id,
           document.text,
@@ -89,7 +150,16 @@ export function createStorage({ pool }) {
           document.retention.owner_id,
           document.retention.state
         ]);
-        await client.query('DELETE FROM segments WHERE document_id = $1', [document.document_id]);
+        if (upsert.rowCount !== 1) {
+          throw new Error('document belongs to a different owner');
+        }
+        await client.query(`
+          DELETE FROM segments AS s
+          USING documents AS d
+          WHERE s.document_id = d.document_id
+            AND d.document_id = $1
+            AND d.owner_id = $2
+        `, [document.document_id, document.retention.owner_id]);
 
         for (const segment of result.segments) {
           await client.query(`
@@ -160,12 +230,13 @@ export function createStorage({ pool }) {
       if (rows.length === 0) return null;
 
       const segments = await pool.query(`
-        SELECT id AS segment_id, document_id, segment_index, text,
-               start_offset, end_offset, text_sha256, metadata, provenance
-        FROM segments
-        WHERE document_id = $1
-        ORDER BY segment_index
-      `, [document_id]);
+        SELECT s.id AS segment_id, s.document_id, s.segment_index, s.text,
+               s.start_offset, s.end_offset, s.text_sha256, s.metadata, s.provenance
+        FROM segments AS s
+        JOIN documents AS d ON d.document_id = s.document_id
+        WHERE s.document_id = $1 AND d.owner_id = $2
+        ORDER BY s.segment_index
+      `, [document_id, owner_id]);
       return mapDocument(rows[0], segments.rows.map(mapSegment));
     },
 
