@@ -13,10 +13,10 @@ Initialize the per-repository Matt Pocock engineering workflow, chart decisions 
 ## Tasks
 
 - T1 | S1 | Initialize repository skill configuration and local tracker | commit: 3a9264a
-- T2 | S2 | Chart and resolve the first Wayfinder decision frontier | commit: pending
-- T3 | S3 | Publish the ordered document-segmentation spec and tickets | commit: pending
-- T4 | S3-S4 | Implement the first vertical slice with TDD | commit: pending
-- T5 | S4-S5 | Validate, audit, and commit locally | commit: pending
+- T2 | S2 | Chart and resolve the first Wayfinder decision frontier | commit: 7c79564
+- T3 | S3 | Publish the ordered document-segmentation spec and tickets | commit: 7c79564
+- T4 | S3-S4 | Implement the first vertical slice with TDD | commit: 369f1f3, b11e149, 600a476
+- T5 | S4-S5 | Validate, audit, and commit locally | commit: pending; native review remains blocked
 
 ## Log
 
