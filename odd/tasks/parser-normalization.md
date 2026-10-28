@@ -1,0 +1,20 @@
+# Parser-neutral normalization vertical slice
+
+Implement the next dependency-ordered RAG slice: normalize parser JSON into the existing document/segment contract and preserve page/layout provenance without adding parser runtimes or private data.
+
+## Specs
+
+- S1: "Prosegui con lo scilpppo delle spec analizza do qule ticket dl wayfinder è stto creato e cosa possiamo proseguire a sciluppare usa pi extensible wokrlfow e pi herdr orchetsrartion e tutte le skills necessarie"
+- S2: "poi peoseguiamo con implemrazioni se abbiamo finalizzato le rocerhde e tutto lo stack da realozza"
+
+## Tasks
+
+- T1 | S1-S2 | Normalize Docling, MinerU, and PaddleOCR-style JSON | route: `src/parser-adapter.js`, `test/parser-adapter.test.js`, `src/index.js` | commit: pending
+- T2 | S1-S2 | Project element layout into segment provenance and preserve fallback behavior | route: `src/segment-document.js`, `test/parser-adapter.test.js` | commit: pending
+- T3 | S1-S2 | Verify synthetic-only, regression, packaging, and container behavior | route: tests and repository guard | commit: pending
+
+## Log
+
+- L1: Prosegui con lo scilpppo delle spec analizza do qule ticket dl wayfinder è stto creato e cosa possiamo proseguire a sciluppare usa pi extensible wokrlfow e pi herdr orchetsrartion e tutte le skills necessarie
+- L2: Research and control-plane orchestration selected parser-neutral normalization as the next frontier. Vector indexing remains deferred because embedding dimension/model and ANN choices are not finalized.
+- L3: Primary-source research is recorded in `.scratch/parser-normalization/research.md`; parser runtimes and model weights remain outside this public Node slice.
