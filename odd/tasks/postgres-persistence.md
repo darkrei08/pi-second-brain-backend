@@ -18,3 +18,4 @@ Implement the next bounded private-RAG vertical slice: persist the existing dete
 - L2: Usa pi herder orchestration pi extensinle workflow eccetera
 - L3: Reconciled repository state: the platform/graph research and deterministic segmentation slice are complete; the next frontier is PostgreSQL document/segment persistence with lexical search. Qdrant, Apache AGE, parser workers, embeddings, object storage, Valkey, gateway, and client packaging remain deferred until their evidence and contracts are ready.
 - L4: Implemented and verified the PostgreSQL persistence slice in commits 033e14c and ef55308. The adapter is transactional, owner-scoped, lexical-searchable, synthetic-only, and keeps vector, graph, parser, gateway, and client work deferred.
+- L5: Work-unit boundary: the four-commit slice is closed at 1970618 after tracker reconciliation and verification. The next implementation slice must be planned separately rather than appended to this commit group.
