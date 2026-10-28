@@ -13,7 +13,7 @@ All personal documents remain outside this repository and are never committed.
 
 ## Tasks
 
-- T1 | S1 | Research delivery surfaces and platform strategy | commit: pending
+- T1 | S1 | Research delivery surfaces and platform strategy | commit: 895f7b3, pending verification commit
 - T2 | S2 | Design graph, PostgreSQL, vector and retrieval architecture | commit: pending
 - T3 | S3-S4 | Initialize the public documentation repository and stack skeleton | commit: pending
 - T4 | S5 | Validate documentation, commit locally, and run Guardian Angel review | commit: pending
