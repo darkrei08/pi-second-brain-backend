@@ -20,3 +20,4 @@ Implement the next dependency-ordered RAG slice: normalize parser JSON into the 
 - L3: Primary-source research is recorded in `.scratch/parser-normalization/research.md`; parser runtimes and model weights remain outside this public Node slice.
 - L4: Implemented and reviewed the pure normalization slice in commits 0a99ebb and c8bf53f. The next vector/embedding slice remains deferred until model family and dimension are decided.
 - L5: Work-unit boundary: this parser-normalization slice closes at ec2797d. The next vector/embedding or parser-runtime work must start from a new ticket and commit group.
+- L6: The next Wayfinder is `.scratch/vector-semantic-search/`; it defines provider-neutral exact pgvector retrieval without fixing a production model dimension or ANN index.
