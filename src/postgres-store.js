@@ -194,6 +194,19 @@ function mapSemanticSearchResult(row) {
   };
 }
 
+function mapHybridSearchResult(row, hybridScore, lexicalRank, semanticRank) {
+  return {
+    ...mapSegment(row),
+    source_hash: row.source_hash,
+    source_label: row.source_label,
+    owner_id: row.owner_id,
+    retention_state: row.retention_state,
+    hybrid_score: hybridScore,
+    lexical_rank: lexicalRank,
+    semantic_rank: semanticRank
+  };
+}
+
 export function createStorage({ pool }) {
   requirePool(pool);
 
@@ -399,6 +412,58 @@ export function createStorage({ pool }) {
         LIMIT $3::integer
       `, [query, owner_id, limit]);
       return rows.map(mapSearchResult);
+    },
+
+    async searchSegmentsHybrid(input) {
+      requireObject(input, 'input');
+      const {
+        query,
+        query_embedding,
+        model_id,
+        owner_id,
+        limit = DEFAULT_SEARCH_LIMIT,
+        rrf_k = 60
+      } = input;
+      requireText(query, 'query');
+      validateQueryEmbedding({ query_embedding, model_id, owner_id, limit });
+      if (!Number.isInteger(rrf_k) || rrf_k <= 0 || rrf_k > 10000) {
+        throw new TypeError('rrf_k must be a positive integer no greater than 10000');
+      }
+
+      const [lexicalMatches, semanticMatches] = await Promise.all([
+        this.searchSegmentsLexical({ query, owner_id, limit }),
+        this.searchSegmentsSemantic({ query_embedding, model_id, owner_id, limit })
+      ]);
+      const fused = new Map();
+      const addMatches = (matches, rankKey) => {
+        matches.forEach((match, index) => {
+          const rank = index + 1;
+          const existing = fused.get(match.id);
+          const entry = existing || {
+            match,
+            hybridScore: 0,
+            lexicalRank: null,
+            semanticRank: null
+          };
+          entry.hybridScore += 1 / (rrf_k + rank);
+          entry[rankKey] = rank;
+          fused.set(match.id, entry);
+        });
+      };
+
+      addMatches(lexicalMatches, 'lexicalRank');
+      addMatches(semanticMatches, 'semanticRank');
+      return [...fused.values()]
+        .sort((left, right) => (
+          right.hybridScore - left.hybridScore ||
+          left.match.document_id.localeCompare(right.match.document_id) ||
+          left.match.segment_index - right.match.segment_index ||
+          left.match.id.localeCompare(right.match.id)
+        ))
+        .slice(0, limit)
+        .map(({ match, hybridScore, lexicalRank, semanticRank }) => (
+          mapHybridSearchResult(match, hybridScore, lexicalRank, semanticRank)
+        ));
     },
 
     async getDocumentWithSegments(document_id, owner_id) {

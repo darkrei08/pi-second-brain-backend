@@ -25,6 +25,15 @@ const semanticDocument = {
   source_label: 'synthetic-semantic-fixture.txt'
 };
 const semanticResult = segmentDocument(semanticDocument, { max_segment_chars: 100 });
+const hybridDocument = {
+  ...document,
+  document_id: 'urn:document:postgres-hybrid',
+  text: 'invoice contract alpha.\n\ncontract beta.\n\nretention gamma.',
+  source_hash: 'sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd',
+  source_label: 'synthetic-hybrid-fixture.txt',
+  retention: { owner_id: 'synthetic-hybrid-owner-a', state: 'active' }
+};
+const hybridResult = segmentDocument(hybridDocument, { max_segment_chars: 100 });
 const semanticVectors3d = [
   [1, 0, 0],
   [0, 1, 0],
@@ -80,6 +89,27 @@ test('rejects malformed semantic input before connecting', async () => {
   await assert.rejects(storage.saveSegmentEmbeddings({ ...valid, embeddings: [{ ...valid.embeddings[0], embedding: [1, Number.NaN, 0] }] }), /finite/);
   await assert.rejects(storage.searchSegmentsSemantic({ query_embedding: [1, 0, 0], model_id: 'synthetic-3d', owner_id: document.retention.owner_id, limit: 101 }), /limit/);
   await assert.rejects(storage.searchSegmentsSemantic({ query_embedding: [0, 0, 0], model_id: 'synthetic-3d', owner_id: document.retention.owner_id, limit: 1 }), /non-zero/);
+  await assert.rejects(
+    storage.searchSegmentsHybrid({
+      query: 'invoice',
+      query_embedding: [1, 0, 0],
+      model_id: 'synthetic-3d',
+      owner_id: document.retention.owner_id,
+      limit: 1,
+      rrf_k: 0
+    }),
+    /rrf_k/
+  );
+  await assert.rejects(
+    storage.searchSegmentsHybrid({
+      query: 'invoice',
+      query_embedding: [1, 0, 0],
+      model_id: 'synthetic-3d',
+      owner_id: document.retention.owner_id,
+      limit: 101
+    }),
+    /limit/
+  );
   assert.equal(contacts, 0);
 });
 
@@ -285,6 +315,95 @@ integrationTest('isolates semantic results by owner, active retention, model, an
   await storage.deleteDocument(tombstoneDocument.document_id, tombstoneDocument.retention.owner_id);
   const secondCascade = await pool.query('SELECT count(*)::int AS count FROM segment_embeddings WHERE segment_id LIKE $1', ['urn:segment:urn:document:postgres-semantic-%']);
   assert.equal(secondCascade.rows[0].count, 0);
+});
+
+integrationTest('fuses lexical and semantic matches with deterministic isolation and provenance', async () => {
+  const storage = createStorage({ pool });
+  const otherDocument = {
+    ...hybridDocument,
+    document_id: 'urn:document:postgres-hybrid-other',
+    source_hash: 'sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee',
+    source_label: 'synthetic-hybrid-other.txt',
+    retention: { owner_id: 'synthetic-hybrid-owner-b', state: 'active' }
+  };
+  const tombstoneDocument = {
+    ...hybridDocument,
+    document_id: 'urn:document:postgres-hybrid-tombstone',
+    source_hash: 'sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff',
+    source_label: 'synthetic-hybrid-tombstone.txt',
+    retention: { owner_id: 'synthetic-hybrid-owner-c', state: 'active' }
+  };
+  const purgedDocument = {
+    ...hybridDocument,
+    document_id: 'urn:document:postgres-hybrid-purged',
+    source_hash: 'sha256:1111111111111111111111111111111111111111111111111111111111111111',
+    source_label: 'synthetic-hybrid-purged.txt',
+    retention: { owner_id: 'synthetic-hybrid-owner-d', state: 'active' }
+  };
+  const otherResult = segmentDocument(otherDocument, { max_segment_chars: 100 });
+  const tombstoneResult = segmentDocument(tombstoneDocument, { max_segment_chars: 100 });
+  const purgedResult = segmentDocument(purgedDocument, { max_segment_chars: 100 });
+  const documents = [hybridDocument, otherDocument, tombstoneDocument, purgedDocument];
+  await Promise.all(documents.map((entry) => removeDocument(entry.document_id, entry.retention.owner_id)));
+  await Promise.all([
+    storage.saveDocumentAndSegments(hybridDocument, hybridResult),
+    storage.saveDocumentAndSegments(otherDocument, otherResult),
+    storage.saveDocumentAndSegments(tombstoneDocument, tombstoneResult),
+    storage.saveDocumentAndSegments(purgedDocument, purgedResult)
+  ]);
+  const saveEmbeddings = (entry, entryResult) => storage.saveSegmentEmbeddings({
+    document_id: entry.document_id,
+    owner_id: entry.retention.owner_id,
+    model_id: 'hybrid-3d',
+    dimensions: 3,
+    embeddings: [
+      { segment_id: entryResult.segments[0].id, embedding: [1, 0, 0] },
+      { segment_id: entryResult.segments[2].id, embedding: [0, 1, 0] }
+    ],
+    created_at: entry.created_at
+  });
+  await Promise.all([
+    saveEmbeddings(hybridDocument, hybridResult),
+    saveEmbeddings(otherDocument, otherResult),
+    saveEmbeddings(tombstoneDocument, tombstoneResult),
+    saveEmbeddings(purgedDocument, purgedResult)
+  ]);
+  await pool.query(
+    "UPDATE documents SET retention_state = 'tombstone' WHERE document_id = $1 AND owner_id = $2",
+    [tombstoneDocument.document_id, tombstoneDocument.retention.owner_id]
+  );
+  await pool.query(
+    "UPDATE documents SET retention_state = 'purged' WHERE document_id = $1 AND owner_id = $2",
+    [purgedDocument.document_id, purgedDocument.retention.owner_id]
+  );
+
+  const request = {
+    query: 'contract',
+    query_embedding: [1, 0, 0],
+    model_id: 'hybrid-3d',
+    owner_id: hybridDocument.retention.owner_id,
+    limit: 3,
+    rrf_k: 60
+  };
+  const matches = await storage.searchSegmentsHybrid(request);
+  assert.deepEqual(matches.map((match) => match.segment_index), [0, 1, 2]);
+  assert.deepEqual(matches.map((match) => [match.lexical_rank, match.semantic_rank]), [[1, 1], [2, null], [null, 2]]);
+  assert.ok(Math.abs(matches[0].hybrid_score - 2 / 61) < 0.000001);
+  assert.ok(Math.abs(matches[1].hybrid_score - 1 / 62) < 0.000001);
+  assert.equal(matches[0].provenance.citation.ref, hybridResult.segments[0].provenance.citation.ref);
+  assert.deepEqual(await storage.searchSegmentsHybrid(request), matches);
+  assert.deepEqual(
+    (await storage.searchSegmentsHybrid({ ...request, owner_id: otherDocument.retention.owner_id })).map((match) => match.document_id),
+    [otherDocument.document_id, otherDocument.document_id, otherDocument.document_id]
+  );
+  assert.equal((await storage.searchSegmentsHybrid({ ...request, owner_id: tombstoneDocument.retention.owner_id })).length, 0);
+  assert.equal((await storage.searchSegmentsHybrid({ ...request, owner_id: purgedDocument.retention.owner_id })).length, 0);
+  assert.deepEqual(
+    (await storage.searchSegmentsHybrid({ ...request, query_embedding: [1, 0, 0, 0], model_id: 'hybrid-4d' })).map((match) => match.semantic_rank),
+    [null, null]
+  );
+
+  await Promise.all(documents.map((entry) => removeDocument(entry.document_id, entry.retention.owner_id)));
 });
 
 integrationTest('replaces atomically and cascades document deletion', async () => {
