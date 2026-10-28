@@ -17,6 +17,10 @@
     "segment-document": "./src/cli.js"
   },
   "scripts": {
-    "test": "node --test"
+    "test": "node --test",
+    "test:integration": "node --test test/integration/postgres-store.test.js"
+  },
+  "dependencies": {
+    "pg": "^8.23.1"
   }
 }
