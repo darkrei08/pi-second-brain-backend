@@ -109,15 +109,17 @@ function projectLocation(elements, startOffset, endOffset) {
     .map((element) => element.bounding_box);
   if (boxes.length === 0) return { page, bounding_box: null };
 
-  return {
-    page,
-    bounding_box: [
-      Math.min(...boxes.map(([left]) => left)),
-      Math.min(...boxes.map(([, top]) => top)),
-      Math.max(...boxes.map(([, , right]) => right)),
-      Math.max(...boxes.map(([, , , bottom]) => bottom))
-    ]
-  };
+  const bounding_box = boxes.reduce(
+    ([left, top, right, bottom], [boxLeft, boxTop, boxRight, boxBottom]) => [
+      Math.min(left, boxLeft),
+      Math.min(top, boxTop),
+      Math.max(right, boxRight),
+      Math.max(bottom, boxBottom)
+    ],
+    [Infinity, Infinity, -Infinity, -Infinity]
+  );
+
+  return { page, bounding_box };
 }
 
 function paragraphRanges(text, codePoints, codePointOffsets) {
