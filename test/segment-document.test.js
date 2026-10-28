@@ -135,8 +135,14 @@ test('rejects invalid public inputs before producing segments', () => {
   assert.throws(() => segmentDocument({ ...document, text: '   ' }, policy), /document\.text/);
   assert.throws(() => segmentDocument({ ...document, source_hash: 'SHA256:invalid' }, policy), /source_hash/);
   assert.throws(() => segmentDocument({ ...document, document_id: '/private/source.pdf' }, policy), /document_id/);
+  assert.throws(() => segmentDocument({ ...document, source_label: '../private/source.pdf' }, policy), /source_label/);
+  assert.throws(() => segmentDocument({ ...document, source_label: 'private\\\\source.pdf' }, policy), /source_label/);
+  assert.throws(() => segmentDocument({ ...document, lineage: { ...document.lineage, model: 42 } }, policy), /lineage\.model/);
+  assert.throws(() => segmentDocument({ ...document, lineage: { ...document.lineage, model: '   ' } }, policy), /lineage\.model/);
+  assert.throws(() => segmentDocument({ ...document, created_at: 'not-a-timestamp' }, policy), /created_at/);
   assert.throws(() => segmentDocument({ ...document, retention: { owner_id: 'synthetic-operator', state: 'unknown' } }, policy), /retention\.state/);
   assert.throws(() => segmentDocument(document, { max_segment_chars: 0 }), /max_segment_chars/);
+  assert.throws(() => segmentDocument(document, { max_segment_chars: 1.5 }), /max_segment_chars/);
 });
 
 test('CLI delegates JSON input to the public use case without extra output', () => {

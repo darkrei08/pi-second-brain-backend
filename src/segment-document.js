@@ -37,6 +37,7 @@ function requireOpaqueId(value, name) {
 
 function validateDocument(document) {
   requireObject(document, 'document');
+  // NOTE: callers must provide opaque identifiers; format validation cannot detect semantic identifiers such as tax codes.
   if (typeof document.document_id !== 'string' || !DOCUMENT_ID_PATTERN.test(document.document_id)) {
     fail('document.document_id must be an opaque document URN');
   }
@@ -48,8 +49,8 @@ function validateDocument(document) {
   requireHash(document.source_hash, 'document.source_hash');
   requireObject(document.lineage, 'document.lineage');
   requireText(document.lineage.parser, 'document.lineage.parser');
-  if (document.lineage.model !== null && typeof document.lineage.model !== 'string') {
-    fail('document.lineage.model must be text or null');
+  if (document.lineage.model !== null && (typeof document.lineage.model !== 'string' || document.lineage.model.trim().length === 0)) {
+    fail('document.lineage.model must be non-empty text or null');
   }
   if (typeof document.created_at !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/u.test(document.created_at) || Number.isNaN(Date.parse(document.created_at))) {
     fail('document.created_at must be RFC3339');
@@ -82,18 +83,30 @@ function trimEnd(codePoints, start, end) {
   return end;
 }
 
-function paragraphRanges(text, codePoints) {
+function buildCodePointOffsets(text) {
+  const offsets = new Array(text.length + 1);
+  let codePointIndex = 0;
+  for (let utf16Index = 0; utf16Index < text.length;) {
+    offsets[utf16Index] = codePointIndex;
+    const width = text.codePointAt(utf16Index) > 0xffff ? 2 : 1;
+    if (width === 2) offsets[utf16Index + 1] = codePointIndex;
+    utf16Index += width;
+    codePointIndex += 1;
+  }
+  offsets[text.length] = codePointIndex;
+  return offsets;
+}
+
+function paragraphRanges(text, codePoints, codePointOffsets) {
   const ranges = [];
   const paragraphBreak = /(?:\r?\n){2,}|\r?\n[ \t]+\r?\n/gu;
   let utf16Start = 0;
   let match;
   while ((match = paragraphBreak.exec(text)) !== null) {
-    const start = Array.from(text.slice(0, utf16Start)).length;
-    const end = Array.from(text.slice(0, match.index)).length;
-    ranges.push([start, end]);
+    ranges.push([codePointOffsets[utf16Start], codePointOffsets[match.index]]);
     utf16Start = match.index + match[0].length;
   }
-  ranges.push([Array.from(text.slice(0, utf16Start)).length, codePoints.length]);
+  ranges.push([codePointOffsets[utf16Start], codePoints.length]);
   return ranges;
 }
 
@@ -131,11 +144,14 @@ export function segmentDocument(document, policy) {
   validatePolicy(policy);
 
   const codePoints = Array.from(document.text);
-  const ranges = paragraphRanges(document.text, codePoints).flatMap(([start, end]) => splitRange(codePoints, start, end, policy.max_segment_chars));
+  const codePointOffsets = buildCodePointOffsets(document.text);
+  const ranges = paragraphRanges(document.text, codePoints, codePointOffsets).flatMap(([start, end]) => splitRange(codePoints, start, end, policy.max_segment_chars));
   const segments = ranges.map(([start_offset, end_offset], segment_index) => {
     const text = codePoints.slice(start_offset, end_offset).join('');
     const text_sha256 = sha256(text);
+    // NOTE: segment IDs are opaque; consumers must not parse URN fields by colon.
     const id = `urn:segment:${document.document_id}:${segment_index}`;
+    // NOTE: text_sha256 is raw hex for the segment contract; qualified hashes live in provenance.
     return {
       id,
       document_id: document.document_id,
