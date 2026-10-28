@@ -97,6 +97,29 @@ function buildCodePointOffsets(text) {
   return offsets;
 }
 
+function projectLocation(elements, startOffset, endOffset) {
+  if (!Array.isArray(elements)) return { page: null, bounding_box: null };
+  const intersecting = elements.filter((element) => element && element.start_offset < endOffset && element.end_offset > startOffset);
+  const pages = new Set(intersecting.map((element) => element.page).filter((page) => Number.isInteger(page)));
+  if (pages.size !== 1) return { page: null, bounding_box: null };
+
+  const page = pages.values().next().value;
+  const boxes = intersecting
+    .filter((element) => element.page === page && Array.isArray(element.bounding_box))
+    .map((element) => element.bounding_box);
+  if (boxes.length === 0) return { page, bounding_box: null };
+
+  return {
+    page,
+    bounding_box: [
+      Math.min(...boxes.map(([left]) => left)),
+      Math.min(...boxes.map(([, top]) => top)),
+      Math.max(...boxes.map(([, , right]) => right)),
+      Math.max(...boxes.map(([, , , bottom]) => bottom))
+    ]
+  };
+}
+
 function paragraphRanges(text, codePoints, codePointOffsets) {
   const ranges = [];
   const paragraphBreak = /(?:\r?\n){2,}|\r?\n[ \t]+\r?\n/gu;
@@ -149,6 +172,7 @@ export function segmentDocument(document, policy) {
   const segments = ranges.map(([start_offset, end_offset], segment_index) => {
     const text = codePoints.slice(start_offset, end_offset).join('');
     const text_sha256 = sha256(text);
+    const location = projectLocation(document.elements, start_offset, end_offset);
     // NOTE: segment IDs are opaque; consumers must not parse URN fields by colon.
     const id = `urn:segment:${document.document_id}:${segment_index}`;
     // NOTE: text_sha256 is raw hex for the segment contract; qualified hashes live in provenance.
@@ -167,8 +191,7 @@ export function segmentDocument(document, policy) {
         source_hash: document.source_hash,
         segment_hash: `sha256:${text_sha256}`,
         location: {
-          page: null,
-          bounding_box: null,
+          ...location,
           char_span: [start_offset, end_offset]
         },
         lineage: {
