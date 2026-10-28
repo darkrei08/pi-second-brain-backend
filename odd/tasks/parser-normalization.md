@@ -19,3 +19,4 @@ Implement the next dependency-ordered RAG slice: normalize parser JSON into the 
 - L2: Research and control-plane orchestration selected parser-neutral normalization as the next frontier. Vector indexing remains deferred because embedding dimension/model and ANN choices are not finalized.
 - L3: Primary-source research is recorded in `.scratch/parser-normalization/research.md`; parser runtimes and model weights remain outside this public Node slice.
 - L4: Implemented and reviewed the pure normalization slice in commits 0a99ebb and c8bf53f. The next vector/embedding slice remains deferred until model family and dimension are decided.
+- L5: Work-unit boundary: this parser-normalization slice closes at ec2797d. The next vector/embedding or parser-runtime work must start from a new ticket and commit group.
