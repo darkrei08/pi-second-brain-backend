@@ -1,4 +1,5 @@
 const DEFAULT_SEARCH_LIMIT = 20;
+const MAX_VECTOR_DIMENSIONS = 16000;
 const DOCUMENT_ID_PATTERN = /^urn:document:[A-Za-z0-9][A-Za-z0-9._~-]*$/;
 const HASH_PATTERN = /^sha256:[0-9a-f]{64}$/;
 const OPAQUE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._~-]*$/;
@@ -20,6 +21,71 @@ function requireText(value, name) {
 function requireObject(value, name) {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
     throw new TypeError(`${name} must be an object`);
+  }
+}
+
+function requireOpaqueId(value, name) {
+  if (typeof value !== 'string' || !OPAQUE_ID_PATTERN.test(value)) {
+    throw new TypeError(`${name} must be opaque`);
+  }
+}
+
+function validateVector(vector, dimensions, name) {
+  if (!Array.isArray(vector) || vector.length !== dimensions) {
+    throw new TypeError(`${name} must have exactly ${dimensions} dimensions`);
+  }
+  let hasNonZeroValue = false;
+  for (const value of vector) {
+    if (typeof value !== 'number' || !Number.isFinite(value)) {
+      throw new TypeError(`${name} values must be finite numbers`);
+    }
+    if (value !== 0) hasNonZeroValue = true;
+  }
+  if (!hasNonZeroValue) {
+    throw new TypeError(`${name} must have a non-zero norm`);
+  }
+}
+
+function vectorLiteral(vector) {
+  return `[${vector.join(',')}]`;
+}
+
+function validateSegmentEmbeddingsInput({ document_id, owner_id, model_id, dimensions, embeddings, created_at }) {
+  if (typeof document_id !== 'string' || !DOCUMENT_ID_PATTERN.test(document_id)) {
+    throw new TypeError('document_id must be an opaque document URN');
+  }
+  requireOpaqueId(owner_id, 'owner_id');
+  requireOpaqueId(model_id, 'model_id');
+  if (!Number.isInteger(dimensions) || dimensions <= 0 || dimensions > MAX_VECTOR_DIMENSIONS) {
+    throw new TypeError(`dimensions must be an integer between 1 and ${MAX_VECTOR_DIMENSIONS}`);
+  }
+  if (!Array.isArray(embeddings) || embeddings.length === 0) {
+    throw new TypeError('embeddings must be non-empty');
+  }
+  if (typeof created_at !== 'string' || !RFC3339_PATTERN.test(created_at) || Number.isNaN(Date.parse(created_at))) {
+    throw new TypeError('created_at must be RFC3339');
+  }
+  const segmentIds = new Set();
+  for (const [index, entry] of embeddings.entries()) {
+    requireObject(entry, `embeddings[${index}]`);
+    requireText(entry.segment_id, `embeddings[${index}].segment_id`);
+    if (segmentIds.has(entry.segment_id)) {
+      throw new TypeError('embeddings must not contain duplicate segment IDs');
+    }
+    segmentIds.add(entry.segment_id);
+    validateVector(entry.embedding, dimensions, `embeddings[${index}].embedding`);
+  }
+}
+
+function validateQueryEmbedding({ query_embedding, model_id, owner_id, limit }) {
+  requireOpaqueId(model_id, 'model_id');
+  requireOpaqueId(owner_id, 'owner_id');
+  if (!Array.isArray(query_embedding) || query_embedding.length === 0 || query_embedding.length > MAX_VECTOR_DIMENSIONS) {
+    throw new TypeError(`query_embedding must have between 1 and ${MAX_VECTOR_DIMENSIONS} dimensions`);
+  }
+  validateVector(query_embedding, query_embedding.length, 'query_embedding');
+  if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+    throw new TypeError('limit must be an integer between 1 and 100');
   }
 }
 
@@ -115,6 +181,19 @@ function mapSearchResult(row) {
   };
 }
 
+function mapSemanticSearchResult(row) {
+  return {
+    ...mapSegment(row),
+    source_hash: row.source_hash,
+    source_label: row.source_label,
+    owner_id: row.owner_id,
+    retention_state: row.retention_state,
+    model_id: row.model_id,
+    distance: Number(row.distance),
+    score: Number(row.score)
+  };
+}
+
 export function createStorage({ pool }) {
   requirePool(pool);
 
@@ -191,6 +270,111 @@ export function createStorage({ pool }) {
       } finally {
         client.release();
       }
+    },
+
+    async saveSegmentEmbeddings(input) {
+      requireObject(input, 'input');
+      const { document_id, owner_id, model_id, dimensions, embeddings, created_at } = input;
+      validateSegmentEmbeddingsInput({ document_id, owner_id, model_id, dimensions, embeddings, created_at });
+
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        const documentCheck = await client.query(`
+          SELECT document_id
+          FROM documents
+          WHERE document_id = $1
+            AND owner_id = $2
+            AND retention_state = 'active'
+          FOR UPDATE
+        `, [document_id, owner_id]);
+        if (documentCheck.rowCount !== 1) {
+          throw new Error('document must belong to the owner and be active');
+        }
+
+        const segmentIds = embeddings.map(({ segment_id }) => segment_id);
+        const segmentCheck = await client.query(`
+          SELECT id
+          FROM segments
+          WHERE document_id = $1
+            AND id = ANY($2::text[])
+        `, [document_id, segmentIds]);
+        if (segmentCheck.rowCount !== segmentIds.length) {
+          throw new Error('every embedding segment must belong to the document');
+        }
+
+        const modelRows = await client.query(`
+          SELECT dimensions
+          FROM segment_embeddings
+          WHERE model_id = $1
+          FOR UPDATE
+        `, [model_id]);
+        if (modelRows.rows.some((row) => row.dimensions !== dimensions)) {
+          throw new Error('model dimensions are inconsistent with existing embeddings');
+        }
+
+        await client.query(`
+          DELETE FROM segment_embeddings AS e
+          USING segments AS s
+          WHERE e.segment_id = s.id
+            AND s.document_id = $1
+            AND e.model_id = $2
+            AND NOT (e.segment_id = ANY($3::text[]))
+        `, [document_id, model_id, segmentIds]);
+
+        for (const embedding of embeddings) {
+          await client.query(`
+            INSERT INTO segment_embeddings (
+              segment_id, model_id, dimensions, embedding, created_at
+            )
+            VALUES ($1, $2, $3, $4::vector, $5)
+            ON CONFLICT (segment_id, model_id) DO UPDATE SET
+              dimensions = EXCLUDED.dimensions,
+              embedding = EXCLUDED.embedding,
+              created_at = EXCLUDED.created_at
+          `, [
+            embedding.segment_id,
+            model_id,
+            dimensions,
+            vectorLiteral(embedding.embedding),
+            created_at
+          ]);
+        }
+        await client.query('COMMIT');
+      } catch (error) {
+        try {
+          await client.query('ROLLBACK');
+        } catch {
+          // Preserve the original database error.
+        }
+        throw error;
+      } finally {
+        client.release();
+      }
+    },
+
+    async searchSegmentsSemantic({ query_embedding, model_id, owner_id, limit = DEFAULT_SEARCH_LIMIT }) {
+      validateQueryEmbedding({ query_embedding, model_id, owner_id, limit });
+
+      const { rows } = await pool.query(`
+        SELECT
+          s.id AS segment_id, s.document_id, s.segment_index, s.text,
+          s.start_offset, s.end_offset, s.text_sha256, s.metadata, s.provenance,
+          d.source_hash, d.source_label, d.owner_id, d.retention_state,
+          e.model_id,
+          e.embedding <=> $1::vector AS distance,
+          1 - (e.embedding <=> $1::vector) AS score
+        FROM segment_embeddings AS e
+        JOIN segments AS s ON s.id = e.segment_id
+        JOIN documents AS d ON d.document_id = s.document_id
+        WHERE d.owner_id = $3
+          AND d.retention_state = 'active'
+          AND e.model_id = $2
+          AND e.dimensions = $4
+        ORDER BY e.embedding <=> $1::vector ASC, s.document_id, s.segment_index, s.id
+        LIMIT $5::integer
+      `, [vectorLiteral(query_embedding), model_id, owner_id, query_embedding.length, limit]);
+      return rows.map(mapSemanticSearchResult);
     },
 
     async searchSegmentsLexical({ query, owner_id, limit = DEFAULT_SEARCH_LIMIT }) {

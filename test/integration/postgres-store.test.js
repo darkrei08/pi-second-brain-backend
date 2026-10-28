@@ -17,6 +17,24 @@ const document = {
   retention: { owner_id: 'synthetic-owner-a', state: 'active' }
 };
 const result = segmentDocument(document, { max_segment_chars: 80 });
+const semanticDocument = {
+  ...document,
+  document_id: 'urn:document:postgres-semantic',
+  text: 'alpha invoice text.\n\nbeta contract text.\n\ngamma retention text.',
+  source_hash: 'sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
+  source_label: 'synthetic-semantic-fixture.txt'
+};
+const semanticResult = segmentDocument(semanticDocument, { max_segment_chars: 100 });
+const semanticVectors3d = [
+  [1, 0, 0],
+  [0, 1, 0],
+  [0.7, 0.7, 0]
+];
+const semanticVectors4d = [
+  [1, 0, 0, 0],
+  [0, 1, 0, 0],
+  [0, 0, 1, 0]
+];
 
 test('rejects malformed persistence input before connecting', async () => {
   const storage = createStorage({ pool: { connect() { throw new Error('database must not be contacted'); } } });
@@ -29,6 +47,40 @@ test('rejects malformed persistence input before connecting', async () => {
     storage.saveDocumentAndSegments({ ...document, retention: { owner_id: '../other-owner', state: 'active' } }, result),
     /owner_id/
   );
+});
+
+test('rejects malformed semantic input before connecting', async () => {
+  let contacts = 0;
+  const storage = createStorage({
+    pool: {
+      connect() {
+        contacts += 1;
+        throw new Error('database must not be contacted');
+      },
+      query() {
+        contacts += 1;
+        throw new Error('database must not be contacted');
+      }
+    }
+  });
+  const valid = {
+    document_id: document.document_id,
+    owner_id: document.retention.owner_id,
+    model_id: 'synthetic-3d',
+    dimensions: 3,
+    embeddings: [{ segment_id: result.segments[0].id, embedding: [1, 0, 0] }],
+    created_at: document.created_at
+  };
+
+  await assert.rejects(storage.saveSegmentEmbeddings({ ...valid, dimensions: 0 }), /dimensions/);
+  await assert.rejects(storage.saveSegmentEmbeddings({ ...valid, model_id: '../model' }), /model_id/);
+  await assert.rejects(storage.saveSegmentEmbeddings({ ...valid, embeddings: [valid.embeddings[0], valid.embeddings[0]] }), /duplicate/);
+  await assert.rejects(storage.saveSegmentEmbeddings({ ...valid, embeddings: [{ ...valid.embeddings[0], embedding: [1, 0] }] }), /dimension/);
+  await assert.rejects(storage.saveSegmentEmbeddings({ ...valid, embeddings: [{ ...valid.embeddings[0], embedding: [0, 0, 0] }] }), /non-zero/);
+  await assert.rejects(storage.saveSegmentEmbeddings({ ...valid, embeddings: [{ ...valid.embeddings[0], embedding: [1, Number.NaN, 0] }] }), /finite/);
+  await assert.rejects(storage.searchSegmentsSemantic({ query_embedding: [1, 0, 0], model_id: 'synthetic-3d', owner_id: document.retention.owner_id, limit: 101 }), /limit/);
+  await assert.rejects(storage.searchSegmentsSemantic({ query_embedding: [0, 0, 0], model_id: 'synthetic-3d', owner_id: document.retention.owner_id, limit: 1 }), /non-zero/);
+  assert.equal(contacts, 0);
 });
 
 async function removeDocument(documentId, ownerId) {
@@ -95,7 +147,10 @@ integrationTest('searches lexical matches with owner isolation and active retent
   await Promise.all([
     removeDocument(document.document_id, document.retention.owner_id),
     removeDocument(otherDocument.document_id, otherDocument.retention.owner_id),
-    removeDocument(tombstoneDocument.document_id, tombstoneDocument.retention.owner_id)
+    removeDocument(tombstoneDocument.document_id, tombstoneDocument.retention.owner_id),
+    removeDocument(semanticDocument.document_id, semanticDocument.retention.owner_id),
+    removeDocument('urn:document:postgres-semantic-other', 'synthetic-owner-b'),
+    removeDocument('urn:document:postgres-semantic-tombstone', 'synthetic-owner-c')
   ]);
   await storage.saveDocumentAndSegments(document, result);
   await storage.saveDocumentAndSegments(otherDocument, segmentDocument(otherDocument, { max_segment_chars: 80 }));
@@ -114,6 +169,122 @@ integrationTest('searches lexical matches with owner isolation and active retent
   await removeDocument(document.document_id, document.retention.owner_id);
   await removeDocument(otherDocument.document_id, otherDocument.retention.owner_id);
   await removeDocument(tombstoneDocument.document_id, tombstoneDocument.retention.owner_id);
+});
+
+integrationTest('stores exact model-scoped cosine results and replaces embeddings deterministically', async () => {
+  const storage = createStorage({ pool });
+  await removeDocument(semanticDocument.document_id, semanticDocument.retention.owner_id);
+  await storage.saveDocumentAndSegments(semanticDocument, semanticResult);
+
+  await storage.saveSegmentEmbeddings({
+    document_id: semanticDocument.document_id,
+    owner_id: semanticDocument.retention.owner_id,
+    model_id: 'synthetic-3d',
+    dimensions: 3,
+    embeddings: semanticResult.segments.map((segment, index) => ({ segment_id: segment.id, embedding: semanticVectors3d[index] })),
+    created_at: semanticDocument.created_at
+  });
+  await storage.saveSegmentEmbeddings({
+    document_id: semanticDocument.document_id,
+    owner_id: semanticDocument.retention.owner_id,
+    model_id: 'synthetic-4d',
+    dimensions: 4,
+    embeddings: semanticResult.segments.map((segment, index) => ({ segment_id: segment.id, embedding: semanticVectors4d[index] })),
+    created_at: semanticDocument.created_at
+  });
+  await assert.rejects(
+    storage.saveSegmentEmbeddings({
+      document_id: semanticDocument.document_id,
+      owner_id: semanticDocument.retention.owner_id,
+      model_id: 'synthetic-3d',
+      dimensions: 4,
+      embeddings: semanticResult.segments.map((segment, index) => ({ segment_id: segment.id, embedding: semanticVectors4d[index] })),
+      created_at: semanticDocument.created_at
+    }),
+    /inconsistent/
+  );
+
+  const matches = await storage.searchSegmentsSemantic({
+    query_embedding: [1, 0, 0],
+    model_id: 'synthetic-3d',
+    owner_id: semanticDocument.retention.owner_id,
+    limit: 3
+  });
+  assert.deepEqual(matches.map((match) => match.segment_index), [0, 2, 1]);
+  assert.equal(matches[0].model_id, 'synthetic-3d');
+  assert.equal(matches[0].distance, 0);
+  assert.equal(matches[0].score, 1);
+  assert.ok(Math.abs(matches[1].score - Math.SQRT1_2) < 0.0001);
+  assert.equal(matches[0].provenance.segment_id, matches[0].id);
+
+  await storage.saveSegmentEmbeddings({
+    document_id: semanticDocument.document_id,
+    owner_id: semanticDocument.retention.owner_id,
+    model_id: 'synthetic-3d',
+    dimensions: 3,
+    embeddings: semanticResult.segments.map((segment, index) => ({
+      segment_id: segment.id,
+      embedding: index === 1 ? [1, 0, 0] : semanticVectors3d[index]
+    })),
+    created_at: '2026-01-02T00:00:00Z'
+  });
+  const replaced = await storage.searchSegmentsSemantic({
+    query_embedding: [1, 0, 0],
+    model_id: 'synthetic-3d',
+    owner_id: semanticDocument.retention.owner_id,
+    limit: 3
+  });
+  assert.deepEqual(replaced.slice(0, 2).map((match) => match.segment_index), [0, 1]);
+
+  await removeDocument(semanticDocument.document_id, semanticDocument.retention.owner_id);
+});
+
+integrationTest('isolates semantic results by owner, active retention, model, and cascades twice', async () => {
+  const storage = createStorage({ pool });
+  const otherDocument = { ...semanticDocument, document_id: 'urn:document:postgres-semantic-other', retention: { owner_id: 'synthetic-owner-b', state: 'active' } };
+  const tombstoneDocument = { ...semanticDocument, document_id: 'urn:document:postgres-semantic-tombstone', retention: { owner_id: 'synthetic-owner-c', state: 'active' } };
+  const otherResult = segmentDocument(otherDocument, { max_segment_chars: 100 });
+  const tombstoneResult = segmentDocument(tombstoneDocument, { max_segment_chars: 100 });
+  await Promise.all([
+    removeDocument(semanticDocument.document_id, semanticDocument.retention.owner_id),
+    removeDocument(otherDocument.document_id, otherDocument.retention.owner_id),
+    removeDocument(tombstoneDocument.document_id, tombstoneDocument.retention.owner_id)
+  ]);
+  await Promise.all([
+    storage.saveDocumentAndSegments(semanticDocument, semanticResult),
+    storage.saveDocumentAndSegments(otherDocument, otherResult),
+    storage.saveDocumentAndSegments(tombstoneDocument, tombstoneResult)
+  ]);
+  const save = (doc, segmentResult, modelId = 'synthetic-3d') => storage.saveSegmentEmbeddings({
+    document_id: doc.document_id,
+    owner_id: doc.retention.owner_id,
+    model_id: modelId,
+    dimensions: 3,
+    embeddings: segmentResult.segments.map((segment) => ({ segment_id: segment.id, embedding: [1, 0, 0] })),
+    created_at: doc.created_at
+  });
+  await Promise.all([
+    save(semanticDocument, semanticResult),
+    save(otherDocument, otherResult),
+    save(tombstoneDocument, tombstoneResult)
+  ]);
+  await pool.query(
+    "UPDATE documents SET retention_state = 'tombstone' WHERE document_id = $1 AND owner_id = $2",
+    [tombstoneDocument.document_id, tombstoneDocument.retention.owner_id]
+  );
+
+  assert.equal((await storage.searchSegmentsSemantic({ query_embedding: [1, 0, 0], model_id: 'synthetic-3d', owner_id: semanticDocument.retention.owner_id, limit: 100 })).length, 3);
+  assert.equal((await storage.searchSegmentsSemantic({ query_embedding: [1, 0, 0], model_id: 'synthetic-3d', owner_id: otherDocument.retention.owner_id, limit: 100 })).length, 3);
+  assert.equal((await storage.searchSegmentsSemantic({ query_embedding: [1, 0, 0], model_id: 'synthetic-3d', owner_id: tombstoneDocument.retention.owner_id, limit: 100 })).length, 0);
+  assert.equal((await storage.searchSegmentsSemantic({ query_embedding: [1, 0, 0], model_id: 'synthetic-4d', owner_id: semanticDocument.retention.owner_id, limit: 100 })).length, 0);
+
+  await storage.deleteDocument(semanticDocument.document_id, semanticDocument.retention.owner_id);
+  const firstCascade = await pool.query('SELECT count(*)::int AS count FROM segment_embeddings WHERE segment_id LIKE $1', ['urn:segment:urn:document:postgres-semantic-%']);
+  assert.equal(firstCascade.rows[0].count, 6);
+  await storage.deleteDocument(otherDocument.document_id, otherDocument.retention.owner_id);
+  await storage.deleteDocument(tombstoneDocument.document_id, tombstoneDocument.retention.owner_id);
+  const secondCascade = await pool.query('SELECT count(*)::int AS count FROM segment_embeddings WHERE segment_id LIKE $1', ['urn:segment:urn:document:postgres-semantic-%']);
+  assert.equal(secondCascade.rows[0].count, 0);
 });
 
 integrationTest('replaces atomically and cascades document deletion', async () => {
