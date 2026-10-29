@@ -40,8 +40,7 @@ function createRecordingStorage(overrides = {}) {
 }
 
 function withServer(storage, options = {}) {
-  const gateway = createGatewayServer({ storage, authenticator, ...options });
-  return gateway;
+  return createGatewayServer({ storage, authenticator, answer_model: 'synthetic-chat', ...options });
 }
 
 async function call(gateway, path, { method = 'GET', headers = auth, body, rawBody, contentLength } = {}) {
@@ -445,8 +444,16 @@ function answerableStorage() {
   const calls = [];
   return {
     calls,
+    async getEmbeddingModel(model_id) {
+      calls.push({ name: 'getEmbeddingModel', input: { model_id } });
+      return { model_id, dimensions: 3, status: 'active' };
+    },
     async searchSegmentsLexical(input) {
       calls.push({ name: 'searchSegmentsLexical', input });
+      return matches;
+    },
+    async searchSegmentsHybrid(input) {
+      calls.push({ name: 'searchSegmentsHybrid', input });
       return matches;
     },
     async revalidateCitations(citations, options) {
@@ -477,6 +484,7 @@ test('answers over evidence with a derived owner and the injected chat adapter',
   assert.equal(response.body.uncertainty.level, 'low');
   assert.equal(response.body.uncertainty.evidence_count, 1);
   assert.equal(chatCalls.length, 1);
+  assert.equal(chatCalls[0].model_id, 'synthetic-chat');
   assert.equal(chatCalls[0].messages[0].role, 'system');
   assert.equal(chatCalls[0].messages[1].content.includes('where is the invoice alpha?'), true);
   const search = storage.calls.find(({ name }) => name === 'searchSegmentsLexical');
@@ -484,7 +492,7 @@ test('answers over evidence with a derived owner and the injected chat adapter',
 });
 
 test('refuses an answer request without a configured model and without authentication', async () => {
-  const unconfigured = withServer(answerableStorage());
+  const unconfigured = withServer(answerableStorage(), { chat: undefined, answer_model: undefined });
   const unavailable = await expectStatus(
     unconfigured,
     '/v1/answers',
@@ -510,6 +518,44 @@ test('refuses an answer request without a configured model and without authentic
     400
   );
   assert.equal(rejected.body.error.code, 'invalid_request');
+});
+
+test('maps a malformed provider response and an embedder failure to boundary errors', async () => {
+  const malformed = withServer(answerableStorage(), {
+    chat: async () => {
+      throw new Error('chat response must be valid JSON');
+    }
+  });
+  const broken = await expectStatus(malformed, '/v1/answers', { method: 'POST', body: { question: 'invoice alpha' } }, 502);
+  assert.equal(broken.body.error.code, 'model_failed');
+
+  const embedTimeout = withServer(answerableStorage(), {
+    chat: async () => 'x [1].',
+    embed: async () => {
+      throw new Error('embedding request timed out');
+    }
+  });
+  const timedOutEmbed = await expectStatus(
+    embedTimeout,
+    '/v1/answers',
+    { method: 'POST', body: { question: 'invoice alpha', embedding_model_id: 'synthetic-3d' } },
+    504
+  );
+  assert.equal(timedOutEmbed.body.error.code, 'model_timeout');
+
+  const embedFailed = withServer(answerableStorage(), {
+    chat: async () => 'x [1].',
+    embed: async () => {
+      throw new Error('embedding request failed with status 500');
+    }
+  });
+  const failedEmbed = await expectStatus(
+    embedFailed,
+    '/v1/answers',
+    { method: 'POST', body: { question: 'invoice alpha', embedding_model_id: 'synthetic-3d' } },
+    502
+  );
+  assert.equal(failedEmbed.body.error.code, 'model_failed');
 });
 
 test('maps a provider timeout and a provider failure to stable boundary errors', async () => {

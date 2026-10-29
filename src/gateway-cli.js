@@ -32,6 +32,7 @@ const chat = process.env.ANSWER_BASE_URL === undefined
 const gateway = createGatewayServer({
   storage: createStorage({ pool }),
   chat,
+  answer_model: process.env.ANSWER_MODEL,
   authenticator: createAuthenticator({
     token: config.token,
     owner_id: config.owner_id,

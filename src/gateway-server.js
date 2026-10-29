@@ -14,7 +14,11 @@ const SEAM_FAILURES = [
   { pattern: /^unknown or foreign collection for this owner$/u, status: 400, code: 'invalid_request' },
   { pattern: /^document belongs to a different owner$/u, status: 409, code: 'conflict' },
   { pattern: /^chat request timed out$/u, status: 504, code: 'model_timeout' },
-  { pattern: /^chat request failed/u, status: 502, code: 'model_failed' }
+  { pattern: /^chat request failed/u, status: 502, code: 'model_failed' },
+  { pattern: /^chat response /u, status: 502, code: 'model_failed' },
+  { pattern: /^embedding request timed out$/u, status: 504, code: 'model_timeout' },
+  { pattern: /^embedding request failed/u, status: 502, code: 'model_failed' },
+  { pattern: /^embedding response /u, status: 502, code: 'model_failed' }
 ];
 
 function mapSeamFailure(error) {
@@ -96,7 +100,7 @@ function send(response, status, payload, extraHeaders = {}) {
   response.end(serialized);
 }
 
-export function createGatewayServer({ storage, authenticator, embed, chat, max_body_bytes = MAX_BODY_BYTES } = {}) {
+export function createGatewayServer({ storage, authenticator, embed, chat, answer_model, max_body_bytes = MAX_BODY_BYTES } = {}) {
   if (storage === undefined || storage === null) {
     throw new TypeError('storage is required');
   }
@@ -108,6 +112,9 @@ export function createGatewayServer({ storage, authenticator, embed, chat, max_b
   }
   if (chat !== undefined && typeof chat !== 'function') {
     throw new TypeError('chat must be a function when provided');
+  }
+  if (answer_model !== undefined && (typeof answer_model !== 'string' || answer_model.trim() === '')) {
+    throw new TypeError('answer_model must be non-empty text when provided');
   }
   if (!Number.isInteger(max_body_bytes) || max_body_bytes < 1) {
     throw new TypeError('max_body_bytes must be a positive integer');
@@ -177,7 +184,7 @@ export function createGatewayServer({ storage, authenticator, embed, chat, max_b
     },
 
     'POST /v1/answers': async ({ body, owner_id }) => {
-      if (chat === undefined) {
+      if (chat === undefined || answer_model === undefined) {
         throw new GatewayError(503, 'answers_unavailable', 'No answer model is configured');
       }
       return {
@@ -189,7 +196,9 @@ export function createGatewayServer({ storage, authenticator, embed, chat, max_b
           question: body.question,
           owner_id,
           collection_ids: optionalCollectionIds(body),
-          model_id: body.model_id,
+          // The chat model and the embedding model are different models with different identities.
+          model_id: answer_model,
+          embedding_model_id: embed === undefined ? undefined : body.embedding_model_id,
           limit: body.limit ?? 6,
           max_tokens: body.max_tokens ?? 600
         })
@@ -280,7 +289,8 @@ export function createGatewayServer({ storage, authenticator, embed, chat, max_b
       });
   });
   server.headersTimeout = 5000;
-  server.requestTimeout = 15000;
+  // An answer may legitimately wait for the model longer than an ordinary request.
+  server.requestTimeout = 120000;
   server.maxHeadersCount = 64;
 
   return Object.freeze({

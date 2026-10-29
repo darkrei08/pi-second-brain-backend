@@ -162,7 +162,8 @@ test('answers a question from real evidence with a fake chat adapter', { skip: !
     chat: async (input) => {
       prompts.push(input);
       return 'The invoice alpha is filed under contract beta [1].';
-    }
+    },
+    answer_model: 'synthetic-chat'
   });
   const { url } = await gateway.start({ port: 0 });
   try {
@@ -210,5 +211,103 @@ test('answers a question from real evidence with a fake chat adapter', { skip: !
     await gateway.stop();
     await pool.query('DELETE FROM documents WHERE owner_id = $1', [owner_id]);
     await pool.query('DELETE FROM collections WHERE owner_id = $1', [owner_id]);
+  }
+});
+
+test('downgrades an answer whose captured evidence was superseded', { skip: !pool }, async () => {
+  const storage = createStorage({ pool });
+  const document_id = 'urn:document:gateway-answer-stale';
+  const base = {
+    document_id,
+    text: 'invoice alpha original wording',
+    source_label: 'gateway-answer-stale.txt',
+    source_hash: `sha256:${'ee'.repeat(32)}`,
+    lineage: { parser: 'synthetic-parser@1.0.0', model: null },
+    created_at: '2026-01-07T00:00:00Z',
+    retention: { owner_id, state: 'active' }
+  };
+  await pool.query('DELETE FROM documents WHERE owner_id = $1', [owner_id]);
+  await storage.saveDocumentAndSegments(base, segmentDocument(base, { max_segment_chars: 200 }));
+
+  const captured = await storage.searchSegmentsLexical({ query: 'invoice alpha', owner_id, limit: 6 });
+  assert.equal(captured.length, 1);
+
+  const superseded = { ...base, text: 'invoice alpha rewritten wording', source_hash: `sha256:${'ff'.repeat(32)}` };
+  await storage.saveDocumentAndSegments(superseded, segmentDocument(superseded, { max_segment_chars: 200 }));
+
+  const staleStorage = {
+    searchSegmentsLexical: async () => captured,
+    revalidateCitations: (citations, options) => storage.revalidateCitations(citations, options)
+  };
+  const gateway = createGatewayServer({
+    storage: staleStorage,
+    authenticator: createAuthenticator({ token, owner_id, shell_users: {} }),
+    chat: async () => 'The invoice alpha was filed under contract beta [1].',
+    answer_model: 'synthetic-chat'
+  });
+  const { url } = await gateway.start({ port: 0 });
+  try {
+    const answer = await call(url, '/v1/answers', { method: 'POST', body: { question: 'invoice alpha' } });
+    assert.equal(answer.status, 200, JSON.stringify(answer.body));
+    assert.deepEqual(answer.body.stale_citations, [captured[0].id]);
+    assert.equal(answer.body.uncertainty.level, 'high');
+    assert.equal(answer.body.uncertainty.stale_count, 1);
+  } finally {
+    await gateway.stop();
+    await pool.query('DELETE FROM documents WHERE owner_id = $1', [owner_id]);
+  }
+});
+
+test('answers with hybrid evidence and reports no uncertainty', { skip: !pool }, async () => {
+  const storage = createStorage({ pool });
+  const document_id = 'urn:document:gateway-answer-hybrid';
+  const model_id = 'synthetic-answer-3d';
+  const document = {
+    document_id,
+    text: 'invoice alpha hybrid evidence',
+    source_label: 'gateway-answer-hybrid.txt',
+    source_hash: `sha256:${'ab'.repeat(32)}`,
+    lineage: { parser: 'synthetic-parser@1.0.0', model: null },
+    created_at: '2026-01-08T00:00:00Z',
+    retention: { owner_id, state: 'active' }
+  };
+  await pool.query('DELETE FROM documents WHERE owner_id = $1', [owner_id]);
+  await storage.registerEmbeddingModel({ model_id, dimensions: 3 });
+  await storage.saveDocumentAndSegments(document, segmentDocument(document, { max_segment_chars: 200 }));
+  const stored = await storage.getDocumentWithSegments(document_id, owner_id);
+  await storage.saveSegmentEmbeddings({
+    document_id,
+    owner_id,
+    model_id,
+    dimensions: 3,
+    embeddings: stored.segments.map((segment) => ({ segment_id: segment.id, embedding: [1, 0, 0] })),
+    created_at: document.created_at
+  });
+
+  const gateway = createGatewayServer({
+    storage,
+    authenticator: createAuthenticator({ token, owner_id, shell_users: {} }),
+    chat: async () => 'The invoice alpha is hybrid evidence [1].',
+    answer_model: 'synthetic-chat',
+    embed: async ({ dimensions, inputs }) => {
+      assert.equal(dimensions, 3);
+      assert.deepEqual(inputs, ['invoice alpha']);
+      return [[1, 0, 0]];
+    }
+  });
+  const { url } = await gateway.start({ port: 0 });
+  try {
+    const answer = await call(url, '/v1/answers', {
+      method: 'POST',
+      body: { question: 'invoice alpha', embedding_model_id: model_id }
+    });
+    assert.equal(answer.status, 200, JSON.stringify(answer.body));
+    assert.equal(answer.body.retrieval.mode, 'hybrid');
+    assert.equal(answer.body.uncertainty.level, 'none');
+    assert.equal(answer.body.citations.length, 1);
+  } finally {
+    await gateway.stop();
+    await pool.query('DELETE FROM documents WHERE owner_id = $1', [owner_id]);
+    await pool.query('DELETE FROM embedding_models WHERE model_id = $1', [model_id]);
   }
 });

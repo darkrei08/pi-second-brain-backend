@@ -76,7 +76,8 @@ test('does not call the model when there is no evidence', async () => {
       return 'invented';
     },
     question: 'what is the VAT rate?',
-    owner_id
+    owner_id,
+    model_id: 'synthetic-chat'
   });
   assert.equal(called, false);
   assert.equal(result.answer, INSUFFICIENT_EVIDENCE_ANSWER);
@@ -99,7 +100,8 @@ test('resolves a cited answer to provenance and reports low uncertainty on lexic
     chat: createChat('The invoice is on page two [2], filed under contract [1].'),
     question: 'where is the invoice?',
     owner_id,
-    collection_ids: ['synthetic-collection-alpha']
+    collection_ids: ['synthetic-collection-alpha'],
+    model_id: 'synthetic-chat'
   });
   assert.equal(result.citations.length, 2);
   assert.deepEqual(result.citations.map(({ segment_id }) => segment_id), ['urn:segment:urn:document:doc-1:0', 'urn:segment:urn:document:doc-2:0']);
@@ -113,6 +115,8 @@ test('resolves a cited answer to provenance and reports low uncertainty on lexic
     unresolved_count: 0,
     stale_count: 0
   });
+  assert.equal(storage.calls[0].input.limit, 6);
+  assert.deepEqual(storage.calls[0].input.collection_ids, ['synthetic-collection-alpha']);
   const revalidation = storage.calls.find(({ name }) => name === 'revalidateCitations');
   assert.deepEqual(revalidation.input.options, { owner_id });
 });
@@ -123,7 +127,8 @@ test('reports high uncertainty for an out-of-range or missing citation', async (
     storage,
     chat: createChat('According to [7] the answer is elsewhere.'),
     question: 'where is the invoice?',
-    owner_id
+    owner_id,
+    model_id: 'synthetic-chat'
   });
   assert.deepEqual(forged.unresolved_citations, [7]);
   assert.equal(forged.citations.length, 0);
@@ -134,7 +139,8 @@ test('reports high uncertainty for an out-of-range or missing citation', async (
     storage,
     chat: createChat('The invoice is somewhere.'),
     question: 'where is the invoice?',
-    owner_id
+    owner_id,
+    model_id: 'synthetic-chat'
   });
   assert.equal(uncited.uncertainty.level, 'high');
   assert.equal(uncited.uncertainty.cited_count, 0);
@@ -146,7 +152,8 @@ test('records a stale citation instead of repairing it', async () => {
     storage,
     chat: createChat('The invoice is on page two [1].'),
     question: 'where is the invoice?',
-    owner_id
+    owner_id,
+    model_id: 'synthetic-chat'
   });
   assert.deepEqual(result.stale_citations, ['urn:segment:urn:document:doc-1:0']);
   assert.equal(result.uncertainty.level, 'high');
@@ -162,7 +169,8 @@ test('treats evidence with self-inconsistent provenance as unusable instead of c
     storage,
     chat: createChat('The invoice is on page two [1].'),
     question: 'where is the invoice?',
-    owner_id
+    owner_id,
+    model_id: 'synthetic-chat'
   });
   assert.deepEqual(result.citations, []);
   assert.deepEqual(result.stale_citations, [broken.id]);
@@ -182,12 +190,42 @@ test('reports no uncertainty when hybrid evidence backs every citation', async (
     chat: createChat('The invoice is on page two [1].'),
     question: 'where is the invoice?',
     owner_id,
-    model_id: 'synthetic-3d'
+    model_id: 'synthetic-chat',
+    embedding_model_id: 'synthetic-3d'
   });
   assert.deepEqual(embedCalls, [{ model_id: 'synthetic-3d', dimensions: 3, inputs: ['where is the invoice?'] }]);
   assert.equal(result.retrieval.mode, 'hybrid');
   assert.equal(result.uncertainty.level, 'none');
   assert.equal(storage.calls.some(({ name }) => name === 'searchSegmentsHybrid'), true);
+});
+
+test('refuses an unregistered embedding model and falls back to lexical without one', async () => {
+  const unregistered = createStorage({ matches: [match(1)], hybrid: true });
+  unregistered.getEmbeddingModel = async () => null;
+  await assert.rejects(
+    answerQuestion({
+      storage: unregistered,
+      embed: async () => [[1, 0, 0]],
+      chat: createChat('x [1].'),
+      question: 'q',
+      owner_id,
+      model_id: 'synthetic-chat',
+      embedding_model_id: 'synthetic-unregistered'
+    }),
+    /embedding model is not registered/
+  );
+
+  const lexicalOnly = createStorage({ matches: [match(1)] });
+  const result = await answerQuestion({
+    storage: lexicalOnly,
+    embed: async () => [[1, 0, 0]],
+    chat: createChat('x [1].'),
+    question: 'q',
+    owner_id,
+    model_id: 'synthetic-chat'
+  });
+  assert.equal(result.retrieval.mode, 'lexical');
+  assert.equal(lexicalOnly.calls.some(({ name }) => name === 'getEmbeddingModel'), false);
 });
 
 test('keeps retrieved text out of the instruction block and one JSON object per evidence line', () => {
@@ -217,13 +255,15 @@ test('propagates a provider failure and validates its own input', async () => {
         throw new Error('chat request timed out');
       },
       question: 'where is the invoice?',
-      owner_id
+      owner_id,
+      model_id: 'synthetic-chat'
     }),
     /chat request timed out/
   );
-  await assert.rejects(answerQuestion({ storage, chat: async () => 'x', question: ' ', owner_id }), /question/);
-  await assert.rejects(answerQuestion({ storage, chat: async () => 'x', question: 'q', owner_id: '../bad' }), /owner_id/);
-  await assert.rejects(answerQuestion({ storage, chat: async () => 'x', question: 'q', owner_id, limit: 0 }), /limit/);
-  await assert.rejects(answerQuestion({ storage, question: 'q', owner_id }), /chat must be a function/);
+  await assert.rejects(answerQuestion({ storage, chat: async () => 'x', question: ' ', owner_id, model_id: 'synthetic-chat' }), /question/);
+  await assert.rejects(answerQuestion({ storage, chat: async () => 'x', question: 'q', owner_id: '../bad', model_id: 'm' }), /owner_id/);
+  await assert.rejects(answerQuestion({ storage, chat: async () => 'x', question: 'q', owner_id, model_id: 'm', limit: 0 }), /limit/);
+  await assert.rejects(answerQuestion({ storage, question: 'q', owner_id, model_id: 'm' }), /chat must be a function/);
   await assert.rejects(answerQuestion({ storage, chat: async () => 'x', question: 'q', owner_id, model_id: 'x', embed: 'no' }), /embed/);
+  await assert.rejects(answerQuestion({ storage, chat: async () => 'x', question: 'q', owner_id }), /model_id/);
 });
