@@ -10,7 +10,7 @@ Implement the next dependency-ordered RAG slice: normalize parser JSON into the 
 ## Tasks
 
 - T1 | S1-S2 | Normalize Docling, MinerU, and PaddleOCR-style JSON | route: `src/parser-adapter.js`, `test/parser-adapter.test.js`, `src/index.js` | commit: 0a99ebb
-- T2 | S1-S2 | Project element layout into segment provenance and preserve fallback behavior | route: `src/segment-document.js`, `test/parser-adapter.test.js` | commit: c8bf53f
+- T2 | S1-S2 | Project element layout into segment provenance and preserve fallback behavior | route: `src/segment-document.js`, `test/parser-adapter.test.js` | commit: `0a99ebb`, `c8bf53f`
 - T3 | S1-S2 | Verify synthetic-only, regression, packaging, and container behavior | route: tests and repository guard | commit: c8bf53f
 
 ## Log
