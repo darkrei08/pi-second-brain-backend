@@ -110,6 +110,17 @@ function validateEmbeddingCoverageInput(input) {
   return { model_id: input.model_id, owner_id: input.owner_id };
 }
 
+function validateEmbeddingBackfillInput(input) {
+  requireObject(input, 'input');
+  requireOpaqueId(input.model_id, 'model_id');
+  requireOpaqueId(input.owner_id, 'owner_id');
+  const { limit = DEFAULT_SEARCH_LIMIT } = input;
+  if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+    throw new TypeError('limit must be an integer between 1 and 100');
+  }
+  return { model_id: input.model_id, owner_id: input.owner_id, limit };
+}
+
 function mapEmbeddingModel(row) {
   return {
     model_id: row.model_id,
@@ -128,6 +139,15 @@ function mapEmbeddingCoverage(row) {
     embedded_segments: row.embedded_segments,
     missing_segments: row.missing_segments,
     dimension_mismatch_segments: row.dimension_mismatch_segments
+  };
+}
+
+function mapEmbeddingBackfillRow(row) {
+  return {
+    document_id: row.document_id,
+    segment_ids: row.segment_ids,
+    missing_segment_ids: row.missing_segment_ids,
+    dimension_mismatch_segment_ids: row.dimension_mismatch_segment_ids
   };
 }
 
@@ -473,6 +493,56 @@ export function createStorage({ pool }) {
       return mapEmbeddingCoverage(rows[0]);
     },
 
+    async listEmbeddingBackfill(input) {
+      const { model_id, owner_id, limit } = validateEmbeddingBackfillInput(input);
+      const modelResult = await pool.query(`
+        SELECT model_id, dimensions, status
+        FROM embedding_models
+        WHERE model_id = $1
+      `, [model_id]);
+      if (modelResult.rowCount !== 1) {
+        throw new Error('embedding model is not registered');
+      }
+      const model = mapEmbeddingModel(modelResult.rows[0]);
+
+      const { rows } = await pool.query(`
+        SELECT
+          s.document_id,
+          array_agg(s.id ORDER BY s.segment_index, s.id) AS segment_ids,
+          COALESCE(
+            array_agg(s.id ORDER BY s.segment_index, s.id)
+              FILTER (WHERE e.segment_id IS NULL),
+            ARRAY[]::text[]
+          ) AS missing_segment_ids,
+          COALESCE(
+            array_agg(s.id ORDER BY s.segment_index, s.id)
+              FILTER (WHERE e.segment_id IS NOT NULL AND e.dimensions <> $2::integer),
+            ARRAY[]::text[]
+          ) AS dimension_mismatch_segment_ids
+        FROM documents AS d
+        JOIN segments AS s ON s.document_id = d.document_id
+        LEFT JOIN segment_embeddings AS e
+          ON e.segment_id = s.id
+         AND e.model_id = $1
+        WHERE d.owner_id = $3
+          AND d.retention_state = 'active'
+        GROUP BY s.document_id
+        HAVING COUNT(s.id) FILTER (
+          WHERE e.segment_id IS NULL OR e.dimensions <> $2::integer
+        ) > 0
+        ORDER BY s.document_id
+        LIMIT $4::integer
+      `, [model_id, model.dimensions, owner_id, limit]);
+
+      return {
+        model_id: model.model_id,
+        owner_id,
+        status: model.status,
+        dimensions: model.dimensions,
+        documents: rows.map(mapEmbeddingBackfillRow)
+      };
+    },
+
     async saveSegmentEmbeddings(input) {
       requireObject(input, 'input');
       const { document_id, owner_id, model_id, dimensions, embeddings, created_at } = input;
@@ -495,23 +565,37 @@ export function createStorage({ pool }) {
 
         const segmentIds = embeddings.map(({ segment_id }) => segment_id);
         const segmentCheck = await client.query(`
-          SELECT id
+          SELECT count(*)::int AS total,
+                 count(*) FILTER (WHERE id = ANY($2::text[]))::int AS matched
           FROM segments
           WHERE document_id = $1
-            AND id = ANY($2::text[])
         `, [document_id, segmentIds]);
-        if (segmentCheck.rowCount !== segmentIds.length) {
+        const { total: documentSegments, matched } = segmentCheck.rows[0];
+        if (matched !== segmentIds.length) {
           throw new Error('every embedding segment must belong to the document');
         }
 
-        const modelRows = await client.query(`
+        const registryModel = await client.query(`
           SELECT dimensions
-          FROM segment_embeddings
+          FROM embedding_models
           WHERE model_id = $1
-          FOR UPDATE
         `, [model_id]);
-        if (modelRows.rows.some((row) => row.dimensions !== dimensions)) {
-          throw new Error('model dimensions are inconsistent with existing embeddings');
+        // A complete rewrite of a registered model's document set is the repair path for
+        // legacy rows whose stored dimension no longer matches the registry.
+        const replacesRegisteredDocument =
+          registryModel.rowCount === 1 &&
+          registryModel.rows[0].dimensions === dimensions &&
+          documentSegments === segmentIds.length;
+        if (!replacesRegisteredDocument) {
+          const modelRows = await client.query(`
+            SELECT dimensions
+            FROM segment_embeddings
+            WHERE model_id = $1
+            FOR UPDATE
+          `, [model_id]);
+          if (modelRows.rows.some((row) => row.dimensions !== dimensions)) {
+            throw new Error('model dimensions are inconsistent with existing embeddings');
+          }
         }
 
         await client.query(`
