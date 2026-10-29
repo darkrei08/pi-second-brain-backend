@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createStorage, segmentDocument } from '../../src/index.js';
+import { createStorage, resolveCitations, segmentDocument } from '../../src/index.js';
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integrationTest = databaseUrl ? test : test.skip;
@@ -109,6 +109,34 @@ test('rejects malformed semantic input before connecting', async () => {
       limit: 101
     }),
     /limit/
+  );
+  await assert.rejects(
+    storage.revalidateCitations([], { owner_id: document.retention.owner_id }),
+    /non-empty/
+  );
+  await assert.rejects(
+    storage.revalidateCitations([{}], { owner_id: '../other-owner' }),
+    /owner_id/
+  );
+  await assert.rejects(
+    storage.revalidateCitations(Array.from({ length: 101 }, () => ({})), { owner_id: document.retention.owner_id }),
+    /100/
+  );
+  await assert.rejects(
+    storage.searchSegmentsLexical({ query: 'invoice', owner_id: '../other-owner', limit: 1 }),
+    /opaque/
+  );
+  await assert.rejects(
+    storage.searchSegmentsLexical({ query: 'invoice', owner_id: document.retention.owner_id, limit: 0 }),
+    /100/
+  );
+  await assert.rejects(
+    storage.searchSegmentsLexical({ query: 'invoice', owner_id: document.retention.owner_id, limit: 1.5 }),
+    /100/
+  );
+  await assert.rejects(
+    storage.searchSegmentsLexical({ query: 'invoice', owner_id: document.retention.owner_id, limit: 101 }),
+    /100/
   );
   assert.equal(contacts, 0);
 });
@@ -404,6 +432,77 @@ integrationTest('fuses lexical and semantic matches with deterministic isolation
   );
 
   await Promise.all(documents.map((entry) => removeDocument(entry.document_id, entry.retention.owner_id)));
+});
+
+integrationTest('revalidates citation freshness across ownership, retention, deletion, and re-ingestion', async () => {
+  const storage = createStorage({ pool });
+  await removeDocument(hybridDocument.document_id, hybridDocument.retention.owner_id);
+  await storage.saveDocumentAndSegments(hybridDocument, hybridResult);
+
+  const matches = await storage.searchSegmentsLexical({
+    query: 'contract',
+    owner_id: hybridDocument.retention.owner_id,
+    limit: 2
+  });
+  const citations = resolveCitations(matches, { owner_id: hybridDocument.retention.owner_id });
+  assert.deepEqual(
+    await storage.revalidateCitations(citations, { owner_id: hybridDocument.retention.owner_id }),
+    { valid: true, stale_ids: [] }
+  );
+
+  const mixedCitations = [
+    citations[0],
+    { ...citations[1], segment_id: 'missing-segment-1' },
+    citations[1],
+    { ...citations[0], segment_id: 'missing-segment-2' }
+  ];
+  assert.deepEqual(
+    await storage.revalidateCitations(mixedCitations, { owner_id: hybridDocument.retention.owner_id }),
+    { valid: false, stale_ids: ['missing-segment-1', 'missing-segment-2'] }
+  );
+
+  assert.deepEqual(
+    await storage.revalidateCitations(citations, { owner_id: 'synthetic-hybrid-owner-b' }),
+    { valid: false, stale_ids: citations.map((citation) => citation.segment_id) }
+  );
+
+  await pool.query(
+    "UPDATE documents SET retention_state = 'tombstone' WHERE document_id = $1 AND owner_id = $2",
+    [hybridDocument.document_id, hybridDocument.retention.owner_id]
+  );
+  assert.deepEqual(
+    await storage.revalidateCitations(citations, { owner_id: hybridDocument.retention.owner_id }),
+    { valid: false, stale_ids: citations.map((citation) => citation.segment_id) }
+  );
+  await pool.query(
+    "UPDATE documents SET retention_state = 'purged' WHERE document_id = $1 AND owner_id = $2",
+    [hybridDocument.document_id, hybridDocument.retention.owner_id]
+  );
+  assert.deepEqual(
+    await storage.revalidateCitations(citations, { owner_id: hybridDocument.retention.owner_id }),
+    { valid: false, stale_ids: citations.map((citation) => citation.segment_id) }
+  );
+
+  await pool.query(
+    "UPDATE documents SET retention_state = 'active' WHERE document_id = $1 AND owner_id = $2",
+    [hybridDocument.document_id, hybridDocument.retention.owner_id]
+  );
+  const changedDocument = {
+    ...hybridDocument,
+    text: 'contract replacement only.',
+    source_hash: 'sha256:9999999999999999999999999999999999999999999999999999999999999999'
+  };
+  await storage.saveDocumentAndSegments(changedDocument, segmentDocument(changedDocument, { max_segment_chars: 100 }));
+  assert.deepEqual(
+    await storage.revalidateCitations(citations, { owner_id: hybridDocument.retention.owner_id }),
+    { valid: false, stale_ids: citations.map((citation) => citation.segment_id) }
+  );
+
+  await storage.deleteDocument(hybridDocument.document_id, hybridDocument.retention.owner_id);
+  assert.deepEqual(
+    await storage.revalidateCitations(citations, { owner_id: hybridDocument.retention.owner_id }),
+    { valid: false, stale_ids: citations.map((citation) => citation.segment_id) }
+  );
 });
 
 integrationTest('replaces atomically and cascades document deletion', async () => {

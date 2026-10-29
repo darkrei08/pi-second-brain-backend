@@ -89,6 +89,39 @@ function validateQueryEmbedding({ query_embedding, model_id, owner_id, limit }) 
   }
 }
 
+function validateCitationRevalidationInput({ citations, owner_id }) {
+  requireOpaqueId(owner_id, 'owner_id');
+  if (!Array.isArray(citations) || citations.length === 0 || citations.length > 100) {
+    throw new TypeError('citations must be a non-empty array of at most 100 items');
+  }
+  const segmentIds = new Set();
+  return citations.map((citation, index) => {
+    requireObject(citation, `citations[${index}]`);
+    if (typeof citation.document_id !== 'string' || !DOCUMENT_ID_PATTERN.test(citation.document_id)) {
+      throw new TypeError(`citations[${index}].document_id must be an opaque document URN`);
+    }
+    requireText(citation.segment_id, `citations[${index}].segment_id`);
+    if (segmentIds.has(citation.segment_id)) {
+      throw new TypeError('citations must not contain duplicate segment IDs');
+    }
+    segmentIds.add(citation.segment_id);
+    requireObject(citation.citation, `citations[${index}].citation`);
+    if (!HASH_PATTERN.test(citation.citation.source_hash)) {
+      throw new TypeError(`citations[${index}].citation.source_hash must be a SHA-256 hash`);
+    }
+    if (!HASH_PATTERN.test(citation.citation.segment_hash)) {
+      throw new TypeError(`citations[${index}].citation.segment_hash must be a SHA-256 hash`);
+    }
+    requireText(citation.citation.ref, `citations[${index}].citation.ref`);
+    return {
+      document_id: citation.document_id,
+      segment_id: citation.segment_id,
+      source_hash: citation.citation.source_hash,
+      segment_hash: citation.citation.segment_hash.slice('sha256:'.length)
+    };
+  });
+}
+
 function validateDocumentAndResult(document, result) {
   requireObject(document, 'document');
   requireObject(result, 'result');
@@ -390,11 +423,41 @@ export function createStorage({ pool }) {
       return rows.map(mapSemanticSearchResult);
     },
 
+    async revalidateCitations(citations, options) {
+      requireObject(options, 'options');
+      const { owner_id } = options;
+      const requested = validateCitationRevalidationInput({ citations, owner_id });
+      const { rows } = await pool.query(`
+        WITH requested AS (
+          SELECT *
+          FROM jsonb_to_recordset($1::jsonb)
+            AS r(document_id text, segment_id text, source_hash text, segment_hash text)
+        )
+        SELECT DISTINCT requested.segment_id
+        FROM requested
+        LEFT JOIN segments AS s
+          ON s.id = requested.segment_id
+         AND s.document_id = requested.document_id
+        LEFT JOIN documents AS d ON d.document_id = requested.document_id
+        WHERE s.id IS NULL
+           OR d.document_id IS NULL
+           OR d.owner_id <> $2
+           OR d.retention_state <> 'active'
+           OR d.source_hash <> requested.source_hash
+           OR s.text_sha256 <> requested.segment_hash
+      `, [JSON.stringify(requested), owner_id]);
+      const stale = new Set(rows.map((row) => row.segment_id));
+      const staleIds = requested
+        .filter((citation) => stale.has(citation.segment_id))
+        .map((citation) => citation.segment_id);
+      return { valid: staleIds.length === 0, stale_ids: staleIds };
+    },
+
     async searchSegmentsLexical({ query, owner_id, limit = DEFAULT_SEARCH_LIMIT }) {
       requireText(query, 'query');
-      requireText(owner_id, 'owner_id');
-      if (!Number.isInteger(limit) || limit <= 0) {
-        throw new TypeError('limit must be a positive integer');
+      requireOpaqueId(owner_id, 'owner_id');
+      if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+        throw new TypeError('limit must be an integer between 1 and 100');
       }
 
       const { rows } = await pool.query(`
