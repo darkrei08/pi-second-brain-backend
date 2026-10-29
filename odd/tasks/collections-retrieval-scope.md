@@ -33,16 +33,18 @@ Collection membership is written only by ingest, which replaces a document's mem
 
 | ID | Spec | Route | Commit |
 | --- | --- | --- | --- |
-| T1 | S11 | Parent: recovery checkpoint, branch `feat/collections-retrieval-scope`, ticket claimed, feature document | _this commit_ |
-| T2 | S1, S5, S9 | Parent: `docker/postgres/init/005-collections.sql` plus `docs/development.md` init list | _this commit_ |
-| T3 | S1, S2, S3, S10 | Parent, test-first: ingest collection scope, `createCollection`, `deleteCollection`, optional filter on the four seams | _this commit_ |
-| T4 | S4, S5, S6 | Parent: integration cases on isolated pgvector | _this commit_ |
-| T5 | S7, S8 | Parent: ticket answer, map decision pointer, traceability row | _this commit_ |
-| T6 | S8, S9 | Parent: unit suite, fresh pgvector integration, differential check against the base commit, package/CLI/privacy checks | _this commit_ |
-| T7 | all | Parent: native review under RDD plus an independent verifier for the owner-scope boundary | _this commit_ |
+| T1 | S11 | Parent: recovery checkpoint, branch `feat/collections-retrieval-scope`, ticket claimed, feature document | `d9a1610` |
+| T2 | S1, S5, S9 | Parent: `docker/postgres/init/005-collections.sql` plus `docs/development.md` init list | `6e296cc` |
+| T3 | S1, S2, S3, S10 | Parent, test-first: ingest collection scope, `createCollection`, `deleteCollection`, optional filter on the four seams | `ebec794` |
+| T4 | S4, S5, S6 | Parent: integration cases on isolated pgvector | `ebec794` |
+| T5 | S7, S8 | Parent: ticket answer, map decision pointer, traceability row | closure commit |
+| T6 | S8, S9 | Parent: unit suite, fresh pgvector integration, differential check against the base commit, package/CLI/privacy checks | closure commit |
+| T7 | all | Parent: native review under RDD plus an independent verifier for the owner-scope boundary | closure commit |
 
 ## Log
 
 - L1 (operator request, 2026-10-29): "Prompt — Context Reset, Wayfinder Recovery & Autonomous Development ... Act as a Senior Software Engineer, Repository Orchestrator and Context-Efficient Development Agent. Your objective is to safely recover the current development state, minimize context consumption, identify the next actionable Wayfinder ticket, and resume implementation using the available orchestration infrastructure." Full directive includes the recovery, wayfinder, orchestration, execution, context and reporting sections.
 - L2 (reconciled state, 2026-10-29): branch `feat/embedding-backfill` at `d43b2a5`, clean tree, 3 commits ahead of origin. Unit suite 41 pass / 11 skipped / 0 fail; integration 14/14 against a fresh pgvector pg17 instance. Only open ticket in the tracker is interface-stack 02; ticket 01 is resolved with V1-V7.
 - L3 (scope correction, 2026-10-29): the interface-stack decision slice (`c2ed36f`, `2a5fee7`, `d43b2a5`) is complete and unpushed; this slice stacks on it as a new branch rather than amending it.
+- L4 (defect found by the new tests, 2026-10-29): the scoped hybrid case returned matches without a segment `id`. Root cause was pre-existing: `mapHybridSearchResult` passed an already-mapped match back through `mapSegment`, which reads `segment_id` and therefore dropped `id`. Fixed by giving the hybrid mapper an explicit field set; a differential probe against the base commit confirms the `id` is the only change to unscoped output. The first attempt spread the already-mapped match and leaked `rank`, `distance`, `model_id`, and `score` inconsistently, so the contract is now explicit and pinned by a key-set assertion.
+- L5 (verification, 2026-10-29): host unit 42 pass / 17 expected skips / 0 fail; live pgvector/pg17 integration 21/21 twice on a disposable instance; Debian `node:22-slim` and Alpine `node:22-alpine` 42/17/0 each; differential probe over lexical, semantic, hybrid, and backfill without a scope; `npm pack --dry-run`, `docker compose config`, and a corpus/credential grep clean.
