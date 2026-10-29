@@ -989,3 +989,430 @@ integrationTest('replaces atomically and cascades document deletion', async () =
   const childRows = await pool.query('SELECT count(*)::int AS count FROM segments WHERE document_id = $1', [document.document_id]);
   assert.equal(childRows.rows[0].count, 0);
 });
+
+const collectionsOwnerA = 'synthetic-collections-owner-a';
+const collectionsOwnerB = 'synthetic-collections-owner-b';
+const collectionAlpha = 'synthetic-collection-alpha';
+const collectionBeta = 'synthetic-collection-beta';
+const collectionForeign = 'synthetic-collection-foreign';
+const collectionsModel3d = 'synthetic-collections-3d';
+const collectionsModel4d = 'synthetic-collections-4d';
+const collectionsCreatedAt = '2026-01-02T00:00:00Z';
+
+function collectionDocument(documentId, text, ownerId, collections) {
+  const candidate = {
+    document_id: documentId,
+    text,
+    source_label: `${documentId.slice('urn:document:'.length)}.txt`,
+    source_hash: `sha256:${String(documentId.length).padStart(2, '0').repeat(32)}`,
+    lineage: { parser: 'synthetic-parser@1.0.0', model: null },
+    created_at: '2026-01-01T00:00:00Z',
+    retention: { owner_id: ownerId, state: 'active' }
+  };
+  if (collections !== undefined) {
+    candidate.collections = collections;
+  }
+  return candidate;
+}
+
+const collectionsAlphaDocument = collectionDocument(
+  'urn:document:collections-alpha',
+  'invoice alpha quarterly',
+  collectionsOwnerA,
+  [collectionAlpha]
+);
+const collectionsBetaDocument = collectionDocument(
+  'urn:document:collections-beta',
+  'contract beta renewal',
+  collectionsOwnerA,
+  [collectionBeta]
+);
+const collectionsUnscopedDocument = collectionDocument(
+  'urn:document:collections-unscoped',
+  'invoice contract gamma mixed',
+  collectionsOwnerA
+);
+const collectionsForeignDocument = collectionDocument(
+  'urn:document:collections-foreign',
+  'invoice delta foreign',
+  collectionsOwnerB,
+  [collectionForeign]
+);
+
+async function seedCollections(storage) {
+  await removeCollections(collectionsOwnerA);
+  await removeCollections(collectionsOwnerB);
+  await storage.createCollection({ collection_id: collectionAlpha, owner_id: collectionsOwnerA, created_at: collectionsCreatedAt });
+  await storage.createCollection({ collection_id: collectionBeta, owner_id: collectionsOwnerA, created_at: collectionsCreatedAt });
+  await storage.createCollection({ collection_id: collectionForeign, owner_id: collectionsOwnerB, created_at: collectionsCreatedAt });
+  for (const candidate of [
+    collectionsAlphaDocument,
+    collectionsBetaDocument,
+    collectionsUnscopedDocument,
+    collectionsForeignDocument
+  ]) {
+    await removeDocument(candidate.document_id, candidate.retention.owner_id);
+    const segmented = segmentDocument(candidate, { max_segment_chars: 100 });
+    await storage.saveDocumentAndSegments(candidate, segmented);
+  }
+  await storage.registerEmbeddingModel({ model_id: collectionsModel3d, dimensions: 3 });
+  await storage.registerEmbeddingModel({ model_id: collectionsModel4d, dimensions: 4 });
+  const vectors = {
+    [collectionsAlphaDocument.document_id]: [1, 0, 0],
+    [collectionsBetaDocument.document_id]: [0, 1, 0],
+    [collectionsUnscopedDocument.document_id]: [0.7, 0.7, 0],
+    [collectionsForeignDocument.document_id]: [1, 0, 0]
+  };
+  for (const candidate of [
+    collectionsAlphaDocument,
+    collectionsBetaDocument,
+    collectionsUnscopedDocument,
+    collectionsForeignDocument
+  ]) {
+    const stored = await storage.getDocumentWithSegments(candidate.document_id, candidate.retention.owner_id);
+    await storage.saveSegmentEmbeddings({
+      document_id: candidate.document_id,
+      owner_id: candidate.retention.owner_id,
+      model_id: collectionsModel3d,
+      dimensions: 3,
+      embeddings: stored.segments.map((segment) => ({
+        segment_id: segment.id,
+        embedding: vectors[candidate.document_id]
+      })),
+      created_at: candidate.created_at
+    });
+  }
+}
+
+async function removeCollections(ownerId) {
+  await pool.query('DELETE FROM collections WHERE owner_id = $1', [ownerId]);
+}
+
+test('rejects malformed collection scope before connecting', async () => {
+  const storage = createStorage({ pool: { connect() { throw new Error('database must not be contacted'); } } });
+  const contactlessPool = {
+    connect() {
+      throw new Error('database must not be contacted');
+    },
+    query() {
+      throw new Error('database must not be contacted');
+    }
+  };
+  const readOnly = createStorage({ pool: contactlessPool });
+
+  await assert.rejects(
+    storage.saveDocumentAndSegments({ ...document, collections: collectionAlpha }, result),
+    /collections/
+  );
+  await assert.rejects(
+    storage.saveDocumentAndSegments({ ...document, collections: ['../other-collection'] }, result),
+    /collections/
+  );
+  await assert.rejects(readOnly.listDocumentCollections(document.document_id, '../other-owner'), /owner_id/);
+  await assert.rejects(
+    readOnly.searchSegmentsLexical({ query: 'invoice', owner_id: document.retention.owner_id, collection_ids: [] }),
+    /collection_ids/
+  );
+  await assert.rejects(
+    readOnly.searchSegmentsLexical({ query: 'invoice', owner_id: document.retention.owner_id, collection_ids: 'synthetic-collection-alpha' }),
+    /collection_ids/
+  );
+  await assert.rejects(
+    readOnly.searchSegmentsLexical({ query: 'invoice', owner_id: document.retention.owner_id, collection_ids: ['../other-collection'] }),
+    /collection_ids/
+  );
+  await assert.rejects(
+    readOnly.searchSegmentsSemantic({
+      query_embedding: [1, 0, 0],
+      model_id: collectionsModel3d,
+      owner_id: document.retention.owner_id,
+      collection_ids: ['']
+    }),
+    /collection_ids/
+  );
+  await assert.rejects(
+    readOnly.searchSegmentsHybrid({
+      query: 'invoice',
+      query_embedding: [1, 0, 0],
+      model_id: collectionsModel3d,
+      owner_id: document.retention.owner_id,
+      collection_ids: []
+    }),
+    /collection_ids/
+  );
+  await assert.rejects(
+    readOnly.listEmbeddingBackfill({ model_id: collectionsModel3d, owner_id: document.retention.owner_id, collection_ids: [] }),
+    /collection_ids/
+  );
+  await assert.rejects(readOnly.createCollection({ collection_id: '../other-collection', owner_id: collectionsOwnerA }), /collection_id/);
+  await assert.rejects(
+    readOnly.createCollection({ collection_id: collectionAlpha, owner_id: '../other-owner' }),
+    /owner_id/
+  );
+  await assert.rejects(readOnly.deleteCollection('../other-collection', collectionsOwnerA), /collection_id/);
+  await assert.rejects(readOnly.deleteCollection(collectionAlpha, '../other-owner'), /owner_id/);
+});
+
+integrationTest('ingests a document into zero, one, or many collections of its owner', async () => {
+  const storage = createStorage({ pool });
+  await seedCollections(storage);
+  const ownerId = collectionsOwnerA;
+
+  assert.deepEqual(
+    await storage.listDocumentCollections(collectionsUnscopedDocument.document_id, ownerId),
+    []
+  );
+  assert.deepEqual(
+    await storage.listDocumentCollections(collectionsAlphaDocument.document_id, ownerId),
+    [collectionAlpha]
+  );
+
+  const many = { ...collectionsUnscopedDocument, collections: [collectionAlpha, collectionBeta] };
+  await storage.saveDocumentAndSegments(many, segmentDocument(many, { max_segment_chars: 100 }));
+  assert.deepEqual(
+    await storage.listDocumentCollections(collectionsUnscopedDocument.document_id, ownerId),
+    [collectionAlpha, collectionBeta]
+  );
+
+  const replaced = { ...collectionsUnscopedDocument, collections: [collectionBeta] };
+  await storage.saveDocumentAndSegments(replaced, segmentDocument(replaced, { max_segment_chars: 100 }));
+  assert.deepEqual(
+    await storage.listDocumentCollections(collectionsUnscopedDocument.document_id, ownerId),
+    [collectionBeta]
+  );
+  await removeCollections(ownerId);
+});
+
+integrationTest('fails closed on an unknown or foreign collection before any write', async () => {
+  const storage = createStorage({ pool });
+  await seedCollections(storage);
+  const ownerId = collectionsOwnerA;
+  const target = collectionDocument('urn:document:collections-rejected', 'invoice rejected', ownerId, [
+    'synthetic-collection-missing'
+  ]);
+  await removeDocument(target.document_id, ownerId);
+
+  await assert.rejects(
+    storage.saveDocumentAndSegments(target, segmentDocument({ ...target, text: 'invoice rejected' }, { max_segment_chars: 100 })),
+    /collection/
+  );
+  assert.equal(await storage.getDocumentWithSegments(target.document_id, ownerId), null);
+
+  const foreignTarget = { ...target, collections: [collectionForeign] };
+  await assert.rejects(
+    storage.saveDocumentAndSegments(foreignTarget, segmentDocument(foreignTarget, { max_segment_chars: 100 })),
+    /collection/
+  );
+  assert.equal(await storage.getDocumentWithSegments(target.document_id, ownerId), null);
+
+  await assert.rejects(
+    pool.query(
+      'INSERT INTO document_collections (collection_id, document_id, owner_id) VALUES ($1, $2, $3)',
+      [collectionAlpha, collectionsForeignDocument.document_id, collectionsOwnerA]
+    ),
+    /foreign key/
+  );
+  await removeCollections(ownerId);
+  await removeCollections(collectionsOwnerB);
+});
+
+integrationTest('scopes lexical, semantic, hybrid, and backfill retrieval to a collection', async () => {
+  const storage = createStorage({ pool });
+  await seedCollections(storage);
+  const ownerId = collectionsOwnerA;
+  const segmentIds = async (candidate) => (
+    (await storage.getDocumentWithSegments(candidate.document_id, candidate.retention.owner_id)).segments.map((segment) => segment.id)
+  );
+  const alphaSegments = await segmentIds(collectionsAlphaDocument);
+  const betaSegments = await segmentIds(collectionsBetaDocument);
+  const unscopedSegments = await segmentIds(collectionsUnscopedDocument);
+
+  assert.deepEqual(
+    (await storage.searchSegmentsLexical({ query: 'invoice', owner_id: ownerId })).map((match) => match.id).sort(),
+    [...alphaSegments, ...unscopedSegments].sort()
+  );
+  assert.deepEqual(
+    (await storage.searchSegmentsLexical({ query: 'invoice', owner_id: ownerId, collection_ids: [collectionAlpha] })).map((match) => match.id),
+    alphaSegments
+  );
+  assert.deepEqual(
+    (await storage.searchSegmentsLexical({ query: 'invoice', owner_id: ownerId, collection_ids: [collectionAlpha, collectionBeta] })).map((match) => match.id).sort(),
+    alphaSegments
+  );
+
+  assert.deepEqual(
+    (await storage.searchSegmentsSemantic({
+      query_embedding: [1, 0, 0],
+      model_id: collectionsModel3d,
+      owner_id: ownerId,
+      collection_ids: [collectionAlpha]
+    })).map((match) => match.id),
+    alphaSegments
+  );
+  assert.deepEqual(
+    (await storage.searchSegmentsSemantic({
+      query_embedding: [1, 0, 0],
+      model_id: collectionsModel3d,
+      owner_id: ownerId,
+      collection_ids: [collectionBeta]
+    })).map((match) => match.id),
+    betaSegments
+  );
+  assert.equal(
+    (await storage.searchSegmentsSemantic({ query_embedding: [1, 0, 0], model_id: collectionsModel3d, owner_id: ownerId })).length,
+    3
+  );
+
+  const alphaHybrid = await storage.searchSegmentsHybrid({
+    query: 'invoice',
+    query_embedding: [1, 0, 0],
+    model_id: collectionsModel3d,
+    owner_id: ownerId,
+    collection_ids: [collectionAlpha]
+  });
+  assert.deepEqual(alphaHybrid.map((match) => match.id), alphaSegments);
+  assert.deepEqual(Object.keys(alphaHybrid[0]).sort(), [
+    'document_id',
+    'end_offset',
+    'hybrid_score',
+    'id',
+    'lexical_rank',
+    'metadata',
+    'owner_id',
+    'provenance',
+    'retention_state',
+    'segment_index',
+    'semantic_rank',
+    'source_hash',
+    'source_label',
+    'start_offset',
+    'text',
+    'text_sha256'
+  ]);
+  assert.equal(
+    (await storage.searchSegmentsHybrid({
+      query: 'invoice',
+      query_embedding: [1, 0, 0],
+      model_id: collectionsModel3d,
+      owner_id: ownerId
+    })).length,
+    3
+  );
+
+  assert.deepEqual(
+    (await storage.listEmbeddingBackfill({ model_id: collectionsModel4d, owner_id: ownerId })).documents.map(({ document_id }) => document_id),
+    [collectionsAlphaDocument.document_id, collectionsBetaDocument.document_id, collectionsUnscopedDocument.document_id]
+  );
+  assert.deepEqual(
+    (await storage.listEmbeddingBackfill({
+      model_id: collectionsModel4d,
+      owner_id: ownerId,
+      collection_ids: [collectionBeta]
+    })).documents.map(({ document_id }) => document_id),
+    [collectionsBetaDocument.document_id]
+  );
+  await removeCollections(ownerId);
+});
+
+integrationTest('isolates a scoped query from another owner and from another collection', async () => {
+  const storage = createStorage({ pool });
+  await seedCollections(storage);
+  const ownerB = collectionsOwnerB;
+  const foreignSegments = (
+    await storage.getDocumentWithSegments(collectionsForeignDocument.document_id, ownerB)
+  ).segments.map((segment) => segment.id);
+
+  assert.deepEqual(
+    (await storage.searchSegmentsLexical({ query: 'invoice', owner_id: ownerB, collection_ids: [collectionForeign] })).map((match) => match.id),
+    foreignSegments
+  );
+  assert.deepEqual(
+    await storage.searchSegmentsLexical({ query: 'invoice', owner_id: collectionsOwnerA, collection_ids: [collectionForeign] }),
+    []
+  );
+  assert.deepEqual(
+    await storage.searchSegmentsSemantic({
+      query_embedding: [1, 0, 0],
+      model_id: collectionsModel3d,
+      owner_id: collectionsOwnerA,
+      collection_ids: [collectionForeign]
+    }),
+    []
+  );
+  assert.deepEqual(
+    await storage.searchSegmentsHybrid({
+      query: 'invoice',
+      query_embedding: [1, 0, 0],
+      model_id: collectionsModel3d,
+      owner_id: collectionsOwnerA,
+      collection_ids: [collectionForeign]
+    }),
+    []
+  );
+  assert.deepEqual(
+    (await storage.listEmbeddingBackfill({
+      model_id: collectionsModel4d,
+      owner_id: collectionsOwnerB,
+      collection_ids: [collectionForeign]
+    })).documents.map(({ document_id }) => document_id),
+    [collectionsForeignDocument.document_id]
+  );
+  assert.deepEqual(
+    (await storage.listEmbeddingBackfill({
+      model_id: collectionsModel4d,
+      owner_id: collectionsOwnerA,
+      collection_ids: [collectionForeign]
+    })).documents,
+    []
+  );
+  assert.deepEqual(await storage.listDocumentCollections(collectionsForeignDocument.document_id, collectionsOwnerA), []);
+  await removeCollections(collectionsOwnerA);
+  await removeCollections(ownerB);
+});
+
+integrationTest('deletes a collection without deleting its documents or embeddings', async () => {
+  const storage = createStorage({ pool });
+  await seedCollections(storage);
+  const ownerId = collectionsOwnerA;
+  const documentSegments = (
+    await storage.getDocumentWithSegments(collectionsAlphaDocument.document_id, ownerId)
+  ).segments.map((segment) => segment.id);
+
+  assert.equal(await storage.deleteCollection(collectionAlpha, collectionsOwnerB), false);
+  assert.equal(await storage.deleteCollection(collectionAlpha, ownerId), true);
+  assert.deepEqual(await storage.listDocumentCollections(collectionsAlphaDocument.document_id, ownerId), []);
+  assert.deepEqual(
+    await storage.searchSegmentsLexical({ query: 'invoice', owner_id: ownerId, collection_ids: [collectionAlpha] }),
+    []
+  );
+  assert.deepEqual(
+    (await storage.searchSegmentsLexical({ query: 'invoice', owner_id: ownerId })).map((match) => match.id).sort(),
+    [...documentSegments, ...(await storage.getDocumentWithSegments(collectionsUnscopedDocument.document_id, ownerId)).segments.map((segment) => segment.id)].sort()
+  );
+  const embeddings = await pool.query(
+    'SELECT count(*)::int AS count FROM segment_embeddings WHERE segment_id = ANY($1::text[])',
+    [documentSegments]
+  );
+  assert.equal(embeddings.rows[0].count, documentSegments.length);
+  await removeCollections(ownerId);
+});
+
+integrationTest('removes memberships when a document is deleted', async () => {
+  const storage = createStorage({ pool });
+  await seedCollections(storage);
+  const ownerId = collectionsOwnerA;
+
+  assert.deepEqual(
+    await storage.listDocumentCollections(collectionsBetaDocument.document_id, ownerId),
+    [collectionBeta]
+  );
+  assert.equal(await storage.deleteDocument(collectionsBetaDocument.document_id, ownerId), true);
+  const memberships = await pool.query(
+    'SELECT count(*)::int AS count FROM document_collections WHERE document_id = $1',
+    [collectionsBetaDocument.document_id]
+  );
+  assert.equal(memberships.rows[0].count, 0);
+  const collections = await pool.query('SELECT count(*)::int AS count FROM collections WHERE owner_id = $1', [ownerId]);
+  assert.equal(collections.rows[0].count, 2);
+  await removeCollections(ownerId);
+});

@@ -90,6 +90,36 @@ function validateQueryEmbedding({ query_embedding, model_id, owner_id, limit }) 
   }
 }
 
+function validateCollectionIds(collection_ids) {
+  if (collection_ids === undefined) return null;
+  if (!Array.isArray(collection_ids) || collection_ids.length === 0) {
+    throw new TypeError('collection_ids must be a non-empty array of opaque collection ids');
+  }
+  const unique = [];
+  for (const [index, collection_id] of collection_ids.entries()) {
+    if (typeof collection_id !== 'string' || !OPAQUE_ID_PATTERN.test(collection_id)) {
+      throw new TypeError(`collection_ids[${index}] must be an opaque collection id`);
+    }
+    if (!unique.includes(collection_id)) unique.push(collection_id);
+  }
+  return unique;
+}
+
+function validateDocumentCollections(collections) {
+  if (collections === undefined) return [];
+  if (!Array.isArray(collections)) {
+    throw new TypeError('document.collections must be an array of opaque collection ids');
+  }
+  const unique = [];
+  for (const [index, collection_id] of collections.entries()) {
+    if (typeof collection_id !== 'string' || !OPAQUE_ID_PATTERN.test(collection_id)) {
+      throw new TypeError(`document.collections[${index}] must be an opaque collection id`);
+    }
+    if (!unique.includes(collection_id)) unique.push(collection_id);
+  }
+  return unique;
+}
+
 function validateEmbeddingModelInput(input) {
   requireObject(input, 'input');
   const { model_id, dimensions, status = 'active' } = input;
@@ -289,13 +319,21 @@ function mapSemanticSearchResult(row) {
   };
 }
 
-function mapHybridSearchResult(row, hybridScore, lexicalRank, semanticRank) {
+function mapHybridSearchResult(match, hybridScore, lexicalRank, semanticRank) {
   return {
-    ...mapSegment(row),
-    source_hash: row.source_hash,
-    source_label: row.source_label,
-    owner_id: row.owner_id,
-    retention_state: row.retention_state,
+    id: match.id,
+    document_id: match.document_id,
+    segment_index: match.segment_index,
+    text: match.text,
+    start_offset: match.start_offset,
+    end_offset: match.end_offset,
+    text_sha256: match.text_sha256,
+    metadata: match.metadata,
+    provenance: match.provenance,
+    source_hash: match.source_hash,
+    source_label: match.source_label,
+    owner_id: match.owner_id,
+    retention_state: match.retention_state,
     hybrid_score: hybridScore,
     lexical_rank: lexicalRank,
     semantic_rank: semanticRank
@@ -308,10 +346,24 @@ export function createStorage({ pool }) {
   return {
     async saveDocumentAndSegments(document, result) {
       validateDocumentAndResult(document, result);
+      const collections = validateDocumentCollections(document.collections);
+      const owner_id = document.retention.owner_id;
 
       const client = await pool.connect();
       try {
         await client.query('BEGIN');
+        if (collections.length > 0) {
+          const owned = await client.query(`
+            SELECT collection_id
+            FROM collections
+            WHERE owner_id = $2
+              AND collection_id = ANY($1::text[])
+            FOR UPDATE
+          `, [collections, owner_id]);
+          if (owned.rowCount !== collections.length) {
+            throw new Error('unknown or foreign collection for this owner');
+          }
+        }
         const upsert = await client.query(`
           INSERT INTO documents (
             document_id, text, source_label, source_hash, lineage,
@@ -366,6 +418,18 @@ export function createStorage({ pool }) {
             JSON.stringify(segment.metadata),
             JSON.stringify(segment.provenance)
           ]);
+        }
+        await client.query(`
+          DELETE FROM document_collections
+          WHERE document_id = $1
+            AND owner_id = $2
+        `, [document.document_id, owner_id]);
+        if (collections.length > 0) {
+          await client.query(`
+            INSERT INTO document_collections (collection_id, document_id, owner_id)
+            SELECT declared.collection_id, $2, $3
+            FROM unnest($1::text[]) AS declared(collection_id)
+          `, [collections, document.document_id, owner_id]);
         }
         await client.query('COMMIT');
       } catch (error) {
@@ -495,6 +559,7 @@ export function createStorage({ pool }) {
 
     async listEmbeddingBackfill(input) {
       const { model_id, owner_id, limit } = validateEmbeddingBackfillInput(input);
+      const collectionIds = validateCollectionIds(input.collection_ids);
       const modelResult = await pool.query(`
         SELECT model_id, dimensions, status
         FROM embedding_models
@@ -526,13 +591,23 @@ export function createStorage({ pool }) {
          AND e.model_id = $1
         WHERE d.owner_id = $3
           AND d.retention_state = 'active'
+          AND (
+            $5::text[] IS NULL
+            OR EXISTS (
+              SELECT 1
+              FROM document_collections AS dc
+              WHERE dc.document_id = d.document_id
+                AND dc.owner_id = d.owner_id
+                AND dc.collection_id = ANY($5::text[])
+            )
+          )
         GROUP BY s.document_id
         HAVING COUNT(s.id) FILTER (
           WHERE e.segment_id IS NULL OR e.dimensions <> $2::integer
         ) > 0
         ORDER BY s.document_id
         LIMIT $4::integer
-      `, [model_id, model.dimensions, owner_id, limit]);
+      `, [model_id, model.dimensions, owner_id, limit, collectionIds]);
 
       return {
         model_id: model.model_id,
@@ -638,8 +713,62 @@ export function createStorage({ pool }) {
       }
     },
 
-    async searchSegmentsSemantic({ query_embedding, model_id, owner_id, limit = DEFAULT_SEARCH_LIMIT }) {
+    async createCollection(input) {
+      requireObject(input, 'input');
+      const { collection_id, owner_id } = input;
+      requireOpaqueId(collection_id, 'collection_id');
+      requireOpaqueId(owner_id, 'owner_id');
+      const { created_at } = input;
+      if (typeof created_at !== 'string' || !RFC3339_PATTERN.test(created_at) || Number.isNaN(Date.parse(created_at))) {
+        throw new TypeError('created_at must be RFC3339');
+      }
+
+      const inserted = await pool.query(`
+        INSERT INTO collections (collection_id, owner_id, created_at)
+        VALUES ($1, $2, $3)
+        ON CONFLICT (collection_id) DO NOTHING
+        RETURNING collection_id, owner_id, created_at
+      `, [collection_id, owner_id, created_at]);
+      if (inserted.rowCount === 1) {
+        return { ...inserted.rows[0] };
+      }
+      const existing = await pool.query(`
+        SELECT collection_id, owner_id, created_at
+        FROM collections
+        WHERE collection_id = $1
+      `, [collection_id]);
+      if (existing.rowCount !== 1 || existing.rows[0].owner_id !== owner_id) {
+        throw new Error('collection belongs to a different owner');
+      }
+      return { ...existing.rows[0] };
+    },
+
+    async deleteCollection(collection_id, owner_id) {
+      requireOpaqueId(collection_id, 'collection_id');
+      requireOpaqueId(owner_id, 'owner_id');
+      const result = await pool.query(
+        'DELETE FROM collections WHERE collection_id = $1 AND owner_id = $2',
+        [collection_id, owner_id]
+      );
+      return result.rowCount === 1;
+    },
+
+    async listDocumentCollections(document_id, owner_id) {
+      requireText(document_id, 'document_id');
+      requireOpaqueId(owner_id, 'owner_id');
+      const { rows } = await pool.query(`
+        SELECT collection_id
+        FROM document_collections
+        WHERE document_id = $1
+          AND owner_id = $2
+        ORDER BY collection_id
+      `, [document_id, owner_id]);
+      return rows.map((row) => row.collection_id);
+    },
+
+    async searchSegmentsSemantic({ query_embedding, model_id, owner_id, limit = DEFAULT_SEARCH_LIMIT, collection_ids }) {
       validateQueryEmbedding({ query_embedding, model_id, owner_id, limit });
+      const collectionIds = validateCollectionIds(collection_ids);
 
       const { rows } = await pool.query(`
         SELECT
@@ -656,9 +785,19 @@ export function createStorage({ pool }) {
           AND d.retention_state = 'active'
           AND e.model_id = $2
           AND e.dimensions = $4
+          AND (
+            $6::text[] IS NULL
+            OR EXISTS (
+              SELECT 1
+              FROM document_collections AS dc
+              WHERE dc.document_id = d.document_id
+                AND dc.owner_id = d.owner_id
+                AND dc.collection_id = ANY($6::text[])
+            )
+          )
         ORDER BY e.embedding <=> $1::vector ASC, s.document_id, s.segment_index, s.id
         LIMIT $5::integer
-      `, [vectorLiteral(query_embedding), model_id, owner_id, query_embedding.length, limit]);
+      `, [vectorLiteral(query_embedding), model_id, owner_id, query_embedding.length, limit, collectionIds]);
       return rows.map(mapSemanticSearchResult);
     },
 
@@ -692,12 +831,13 @@ export function createStorage({ pool }) {
       return { valid: staleIds.length === 0, stale_ids: staleIds };
     },
 
-    async searchSegmentsLexical({ query, owner_id, limit = DEFAULT_SEARCH_LIMIT }) {
+    async searchSegmentsLexical({ query, owner_id, limit = DEFAULT_SEARCH_LIMIT, collection_ids }) {
       requireText(query, 'query');
       requireOpaqueId(owner_id, 'owner_id');
       if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
         throw new TypeError('limit must be an integer between 1 and 100');
       }
+      const collectionIds = validateCollectionIds(collection_ids);
 
       const { rows } = await pool.query(`
         SELECT
@@ -710,9 +850,19 @@ export function createStorage({ pool }) {
         WHERE d.owner_id = $2
           AND d.retention_state = 'active'
           AND s.search_vector @@ plainto_tsquery('simple', $1)
+          AND (
+            $4::text[] IS NULL
+            OR EXISTS (
+              SELECT 1
+              FROM document_collections AS dc
+              WHERE dc.document_id = d.document_id
+                AND dc.owner_id = d.owner_id
+                AND dc.collection_id = ANY($4::text[])
+            )
+          )
         ORDER BY rank DESC, s.document_id, s.segment_index
         LIMIT $3::integer
-      `, [query, owner_id, limit]);
+      `, [query, owner_id, limit, collectionIds]);
       return rows.map(mapSearchResult);
     },
 
@@ -724,17 +874,19 @@ export function createStorage({ pool }) {
         model_id,
         owner_id,
         limit = DEFAULT_SEARCH_LIMIT,
-        rrf_k = 60
+        rrf_k = 60,
+        collection_ids
       } = input;
       requireText(query, 'query');
       validateQueryEmbedding({ query_embedding, model_id, owner_id, limit });
       if (!Number.isInteger(rrf_k) || rrf_k <= 0 || rrf_k > 10000) {
         throw new TypeError('rrf_k must be a positive integer no greater than 10000');
       }
+      const collectionIds = validateCollectionIds(collection_ids);
 
       const [lexicalMatches, semanticMatches] = await Promise.all([
-        this.searchSegmentsLexical({ query, owner_id, limit }),
-        this.searchSegmentsSemantic({ query_embedding, model_id, owner_id, limit })
+        this.searchSegmentsLexical({ query, owner_id, limit, collection_ids: collectionIds ?? undefined }),
+        this.searchSegmentsSemantic({ query_embedding, model_id, owner_id, limit, collection_ids: collectionIds ?? undefined })
       ]);
       const fused = new Map();
       const addMatches = (matches, rankKey) => {
