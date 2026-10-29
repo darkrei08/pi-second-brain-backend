@@ -1,8 +1,9 @@
+import { OPAQUE_ID_PATTERN } from './opaque-id.js';
+
 const DEFAULT_SEARCH_LIMIT = 20;
 const MAX_VECTOR_DIMENSIONS = 16000;
 const DOCUMENT_ID_PATTERN = /^urn:document:[A-Za-z0-9][A-Za-z0-9._~-]*$/;
 const HASH_PATTERN = /^sha256:[0-9a-f]{64}$/;
-const OPAQUE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._~-]*$/;
 const RETENTION_STATES = new Set(['active', 'tombstone', 'purged']);
 const EMBEDDING_MODEL_STATUSES = new Set(['active', 'deprecated']);
 const RFC3339_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/u;
