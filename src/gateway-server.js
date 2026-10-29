@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
 
-import { answerQuestion } from './answer-question.js';
+import { answerQuestion, researchQuestion } from './answer-question.js';
 import { GatewayError, errorPayload } from './gateway-error.js';
 import { describeRetrievalMode, segmentDocument } from './index.js';
 
@@ -10,6 +10,7 @@ const MAX_CITATION_BATCH = 100;
 const JSON_CONTENT_TYPE = /^application\/json(?:;|$)/iu;
 const UNAUTHENTICATED_PATHS = new Set(['/healthz', '/readyz']);
 const CHAT_COMPLETION_FIELDS = new Set(['model', 'messages', 'stream', 'collection_ids', 'embedding_model_id', 'limit', 'max_tokens']);
+const RESEARCH_FIELDS = new Set(['question', 'collection_ids', 'embedding_model_id', 'limit', 'max_tokens']);
 // Seam errors with a stable message that means the caller sent something unusable.
 const SEAM_FAILURES = [
   { pattern: /^embedding model is not registered$/u, status: 400, code: 'invalid_request' },
@@ -100,6 +101,23 @@ function optionalCollectionIds(body) {
     throw new GatewayError(400, 'invalid_request', 'collection_ids must be a non-empty array');
   }
   return body.collection_ids;
+}
+
+function researchRequest(body) {
+  for (const key of Object.keys(body)) {
+    if (!RESEARCH_FIELDS.has(key)) {
+      throw new GatewayError(400, 'invalid_request', `Unsupported research field: ${key}`);
+    }
+  }
+  if (body.limit !== undefined && (!Number.isInteger(body.limit) || body.limit < 1 || body.limit > 100)) {
+    throw new GatewayError(400, 'invalid_request', 'limit must be an integer between 1 and 100');
+  }
+  if (body.max_tokens !== undefined && (!Number.isInteger(body.max_tokens) || body.max_tokens < 1 || body.max_tokens > 8192)) {
+    throw new GatewayError(400, 'invalid_request', 'max_tokens must be an integer between 1 and 8192');
+  }
+  if (body.embedding_model_id !== undefined && (typeof body.embedding_model_id !== 'string' || body.embedding_model_id.trim() === '')) {
+    throw new GatewayError(400, 'invalid_request', 'embedding_model_id must be non-empty text');
+  }
 }
 
 function chatCompletionQuestion(body) {
@@ -263,6 +281,28 @@ export function createGatewayServer({ storage, authenticator, embed, chat, answe
           owner_id,
           collection_ids: optionalCollectionIds(body),
           // The chat model and the embedding model are different models with different identities.
+          model_id: answer_model,
+          embedding_model_id: embed === undefined ? undefined : body.embedding_model_id,
+          limit: body.limit ?? 6,
+          max_tokens: body.max_tokens ?? 600
+        })
+      };
+    },
+
+    'POST /v1/research': async ({ body, owner_id }) => {
+      if (chat === undefined || answer_model === undefined) {
+        throw new GatewayError(503, 'answers_unavailable', 'No answer model is configured');
+      }
+      researchRequest(body);
+      return {
+        status: 200,
+        body: await researchQuestion({
+          storage,
+          chat,
+          embed,
+          question: body.question,
+          owner_id,
+          collection_ids: optionalCollectionIds(body),
           model_id: answer_model,
           embedding_model_id: embed === undefined ? undefined : body.embedding_model_id,
           limit: body.limit ?? 6,

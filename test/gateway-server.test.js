@@ -833,3 +833,76 @@ test('streams empty-evidence answers without a model call and sanitizes post-hea
   assert.equal(broken.body.includes('answer_metadata'), false);
   assert.equal(broken.body.includes('[DONE]'), false);
 });
+
+test('serves bounded research with the authenticated owner and an unchanged collection scope', async () => {
+  const storage = answerableStorage();
+  const matches = [1, 2, 3, 4].map((index) => ({
+    id: `segment-${index}`,
+    document_id: `document-${index}`,
+    text: `evidence ${index}`,
+    source_label: `source-${index}.txt`
+  }));
+  const byQuery = new Map([
+    ['main question', [matches[0], matches[1]]],
+    ['follow-up alpha', [matches[1], matches[2]]],
+    ['follow-up beta', [matches[2], matches[3]]]
+  ]);
+  const searchInputs = [];
+  storage.searchSegmentsLexical = async (input) => {
+    searchInputs.push(input);
+    return byQuery.get(input.query) ?? [];
+  };
+  const chatCalls = [];
+  const gateway = withServer(storage, {
+    chat: async (input) => {
+      chatCalls.push(input);
+      return input.max_tokens === 128
+        ? JSON.stringify({ queries: ['follow-up alpha', 'follow-up beta'] })
+        : 'The research answer has an uncertainty report.';
+    }
+  });
+  const response = await call(gateway, '/v1/research', {
+    method: 'POST',
+    body: { question: 'main question', collection_ids: ['synthetic-collection-alpha'], limit: 6 }
+  });
+  await gateway.stop();
+  assert.equal(response.status, 200, JSON.stringify(response.body));
+  assert.deepEqual(Object.keys(response.body).sort(), [
+    'answer', 'citations', 'retrieval', 'stale_citations', 'uncertainty', 'unresolved_citations'
+  ]);
+  assert.equal(response.body.answer, 'The research answer has an uncertainty report.');
+  assert.equal(response.body.retrieval.matches, 4);
+  assert.equal(chatCalls.length, 2);
+  assert.deepEqual(searchInputs.map(({ query }) => query), ['main question', 'follow-up alpha', 'follow-up beta']);
+  assert.ok(searchInputs.every(({ owner_id }) => owner_id === 'owner-one'));
+  assert.ok(searchInputs.every(({ collection_ids }) => collection_ids[0] === 'synthetic-collection-alpha'));
+
+  const unauthenticated = withServer(answerableStorage(), { chat: async () => 'unused' });
+  const refused = await expectStatus(unauthenticated, '/v1/research', { method: 'POST', headers: {}, body: { question: 'q' } }, 401);
+  assert.equal(refused.body.error.code, 'unauthorized');
+
+  const forged = withServer(answerableStorage(), { chat: async () => 'unused' });
+  const rejected = await expectStatus(forged, '/v1/research', { method: 'POST', body: { question: 'q', owner_id: 'owner-two' } }, 400);
+  assert.equal(rejected.body.error.code, 'invalid_request');
+
+  const unsupported = withServer(answerableStorage(), { chat: async () => 'unused' });
+  const rejectedField = await expectStatus(unsupported, '/v1/research', { method: 'POST', body: { question: 'q', stream: true } }, 400);
+  assert.equal(rejectedField.body.error.code, 'invalid_request');
+});
+
+test('keeps an unknown research collection scoped and returns unsupported evidence', async () => {
+  const storage = answerableStorage();
+  const searchInputs = [];
+  storage.searchSegmentsLexical = async (input) => { searchInputs.push(input); return []; };
+  let modelCalls = 0;
+  const gateway = withServer(storage, { chat: async () => { modelCalls += 1; return 'must not run'; } });
+  const response = await call(gateway, '/v1/research', {
+    method: 'POST',
+    body: { question: 'private question', collection_ids: ['unknown-collection'] }
+  });
+  await gateway.stop();
+  assert.equal(response.status, 200);
+  assert.equal(response.body.uncertainty.level, 'unsupported');
+  assert.deepEqual(searchInputs.map(({ collection_ids }) => collection_ids), [['unknown-collection']]);
+  assert.equal(modelCalls, 0);
+});
