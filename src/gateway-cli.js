@@ -7,7 +7,13 @@ import { createAuthenticator } from './gateway-auth.js';
 import { loadGatewayConfig } from './gateway-config.js';
 import { createGatewayServer } from './gateway-server.js';
 
-const config = loadGatewayConfig(process.env);
+let config;
+try {
+  config = loadGatewayConfig(process.env);
+} catch (error) {
+  process.stderr.write(`gateway configuration refused: ${error.message}\n`);
+  process.exit(1);
+}
 const pool = new pg.Pool({ connectionString: config.database_url });
 const embed = process.env.EMBEDDING_BASE_URL === undefined
   ? undefined
