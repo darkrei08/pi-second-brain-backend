@@ -70,12 +70,12 @@ test('drives ingest, retrieval, and citation revalidation over HTTP', { skip: !p
       body: { query: 'invoice', collection_ids: [collection_id] }
     });
     assert.equal(scoped.status, 200);
-    assert.equal(scoped.body.mode.mode, 'lexical');
+    assert.equal(scoped.body.retrieval.mode, 'lexical');
     assert.ok(scoped.body.matches.length >= 1);
 
     const unscoped = await call(url, '/v1/retrieval/query', { method: 'POST', body: { query: 'nonexistent-term' } });
     assert.deepEqual(unscoped.body.matches, []);
-    assert.equal(unscoped.body.mode.mode, 'empty');
+    assert.equal(unscoped.body.retrieval.mode, 'empty');
 
     const match = scoped.body.matches[0];
     const citations = await call(url, '/v1/citations/resolve', {
@@ -126,8 +126,8 @@ test('refuses a document that another owner already holds', { skip: !pool }, asy
       method: 'POST',
       body: { document: { ...foreign, retention: undefined } }
     });
-    assert.equal(attempt.status, 500);
-    assert.deepEqual(attempt.body, { error: { code: 'internal_error', message: 'The request failed' } });
+    assert.equal(attempt.status, 409);
+    assert.deepEqual(attempt.body, { error: { code: 'conflict', message: 'document belongs to a different owner' } });
     const stored = await storage.getDocumentWithSegments(document_id, 'gateway-integration-foreign');
     assert.equal(stored.retention.owner_id, 'gateway-integration-foreign');
   } finally {

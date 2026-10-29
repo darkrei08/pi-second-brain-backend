@@ -52,7 +52,10 @@ test('resolves a mapped shell user and fails closed on an unknown or missing one
   for (const headers of [
     { authorization: `Bearer ${token}` },
     { authorization: `Bearer ${token}`, 'x-shell-user-id': 'shell-unknown' },
-    { authorization: `Bearer ${token}`, 'x-shell-user-id': '' }
+    { authorization: `Bearer ${token}`, 'x-shell-user-id': '' },
+    { authorization: `Bearer ${token}`, 'x-shell-user-id': '__proto__' },
+    { authorization: `Bearer ${token}`, 'x-shell-user-id': 'constructor' },
+    { authorization: `Bearer ${token}`, 'x-shell-user-id': 'toString' }
   ]) {
     assert.throws(
       () => mapped.authenticate(headers),

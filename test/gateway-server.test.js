@@ -80,8 +80,12 @@ test('serves liveness without a dependency and refuses unknown routes and method
   assert.deepEqual(storage.calls, []);
 
   const gateway2 = withServer(createRecordingStorage());
-  const missing = await expectStatus(gateway2, '/v1/nope', { headers: {} }, 404);
+  const missing = await expectStatus(gateway2, '/v1/nope', { headers: auth }, 404);
   assert.equal(missing.body.error.code, 'not_found');
+
+  const gateway2b = withServer(createRecordingStorage());
+  const hidden = await expectStatus(gateway2b, '/v1/nope', { headers: {} }, 401);
+  assert.equal(hidden.body.error.code, 'unauthorized');
 
   const gateway3 = withServer(createRecordingStorage());
   const wrongMethod = await expectStatus(gateway3, '/v1/models', { method: 'POST', headers: auth, body: {} }, 405);
@@ -185,8 +189,8 @@ test('runs lexical and hybrid retrieval with the derived owner and the collectio
     limit: 5,
     collection_ids: ['synthetic-collection-alpha']
   }]);
-  assert.equal(lexical.body.mode.mode, 'lexical');
-  assert.equal(lexical.body.mode.matches, 1);
+  assert.equal(lexical.body.retrieval.mode, 'lexical');
+  assert.equal(lexical.body.retrieval.matches, 1);
 
   const hybridStorage = createRecordingStorage();
   const hybridGateway = withServer(hybridStorage);
@@ -197,7 +201,7 @@ test('runs lexical and hybrid retrieval with the derived owner and the collectio
   await hybridGateway.stop();
   assert.equal(hybrid.status, 200);
   assert.equal(hybridStorage.calls[0].input.owner_id, 'owner-one');
-  assert.equal(hybrid.body.mode.mode, 'hybrid');
+  assert.equal(hybrid.body.retrieval.mode, 'hybrid');
 
   const embedderCalls = [];
   const embedGateway = withServer(createRecordingStorage(), {
@@ -306,6 +310,88 @@ test('ingests through the segmentation seam with a server-derived owner', async 
     400
   );
   assert.match(rejected.body.error.message, /owner_id/);
+
+  const nestedOwner = withServer(createRecordingStorage());
+  const nested = await expectStatus(
+    nestedOwner,
+    '/v1/documents/ingest',
+    {
+      method: 'POST',
+      body: {
+        document: {
+          document_id: 'urn:document:x',
+          owner_id: 'owner-two',
+          text: 'x',
+          source_label: 'x.txt',
+          source_hash: `sha256:${'ab'.repeat(32)}`,
+          lineage: { parser: 'synthetic-parser@1.0.0', model: null },
+          created_at: '2026-01-03T00:00:00Z'
+        }
+      }
+    },
+    400
+  );
+  assert.match(nested.body.error.message, /owner_id/);
+});
+
+test('maps a refused ingest to a conflict and a missing collection to a caller error', async () => {
+  const conflicting = withServer(createRecordingStorage({
+    saveDocumentAndSegments: async () => {
+      throw new Error('document belongs to a different owner');
+    }
+  }));
+  const conflict = await call(conflicting, '/v1/documents/ingest', {
+    method: 'POST',
+    body: {
+      document: {
+        document_id: 'urn:document:gateway-conflict',
+        text: 'Invoice alpha.',
+        source_label: 'gateway-conflict.txt',
+        source_hash: `sha256:${'ab'.repeat(32)}`,
+        lineage: { parser: 'synthetic-parser@1.0.0', model: null },
+        created_at: '2026-01-03T00:00:00Z'
+      }
+    }
+  });
+  await conflicting.stop();
+  assert.equal(conflict.status, 409);
+  assert.equal(conflict.body.error.code, 'conflict');
+
+  const missingCollection = withServer(createRecordingStorage({
+    saveDocumentAndSegments: async () => {
+      throw new Error('unknown or foreign collection for this owner');
+    }
+  }));
+  const refused = await call(missingCollection, '/v1/documents/ingest', {
+    method: 'POST',
+    body: {
+      document: {
+        document_id: 'urn:document:gateway-missing-collection',
+        text: 'Invoice alpha.',
+        source_label: 'gateway-missing.txt',
+        source_hash: `sha256:${'ab'.repeat(32)}`,
+        lineage: { parser: 'synthetic-parser@1.0.0', model: null },
+        created_at: '2026-01-03T00:00:00Z',
+        collections: ['synthetic-collection-unknown']
+      }
+    }
+  });
+  await missingCollection.stop();
+  assert.equal(refused.status, 400);
+  assert.equal(refused.body.error.code, 'invalid_request');
+});
+
+test('reports an unregistered model as a caller error on coverage', async () => {
+  const storage = createRecordingStorage({
+    inspectEmbeddingCoverage: async () => {
+      throw new Error('embedding model is not registered');
+    }
+  });
+  const gateway = withServer(storage);
+  const response = await call(gateway, '/v1/models?model_id=synthetic-unknown');
+  await gateway.stop();
+  assert.equal(response.status, 400);
+  assert.equal(response.body.error.code, 'invalid_request');
 });
 
 test('reports malformed seam input as a caller error', async () => {

@@ -7,6 +7,22 @@ export const MAX_BODY_BYTES = 1024 * 1024;
 const MAX_CITATION_BATCH = 100;
 const JSON_CONTENT_TYPE = /^application\/json(?:;|$)/iu;
 const UNAUTHENTICATED_PATHS = new Set(['/healthz', '/readyz']);
+// Seam errors with a stable message that means the caller sent something unusable.
+const SEAM_FAILURES = [
+  { pattern: /^embedding model is not registered$/u, status: 400, code: 'invalid_request' },
+  { pattern: /^unknown or foreign collection for this owner$/u, status: 400, code: 'invalid_request' },
+  { pattern: /^document belongs to a different owner$/u, status: 409, code: 'conflict' }
+];
+
+function mapSeamFailure(error) {
+  if (!(error instanceof Error)) return null;
+  for (const failure of SEAM_FAILURES) {
+    if (failure.pattern.test(error.message)) {
+      return new GatewayError(failure.status, failure.code, error.message);
+    }
+  }
+  return null;
+}
 
 function requireJsonBody(request) {
   const contentType = request.headers['content-type'];
@@ -114,7 +130,7 @@ export function createGatewayServer({ storage, authenticator, embed, max_body_by
           limit: limit ?? 20,
           collection_ids
         });
-        return { status: 200, body: { mode: describeRetrievalMode(matches), matches } };
+        return { status: 200, body: { retrieval: describeRetrievalMode(matches), matches } };
       }
       if (mode !== 'hybrid') {
         throw new GatewayError(400, 'invalid_request', 'mode must be lexical or hybrid');
@@ -143,7 +159,7 @@ export function createGatewayServer({ storage, authenticator, embed, max_body_by
         limit: limit ?? 20,
         collection_ids
       });
-      return { status: 200, body: { mode: describeRetrievalMode(matches, { model_id }), matches } };
+      return { status: 200, body: { retrieval: describeRetrievalMode(matches, { model_id }), matches } };
     },
 
     'POST /v1/citations/resolve': async ({ body, owner_id }) => {
@@ -166,6 +182,7 @@ export function createGatewayServer({ storage, authenticator, embed, max_body_by
 
     'POST /v1/documents/ingest': async ({ body, owner_id }) => {
       const document = requireObject(body.document, 'document');
+      rejectCallerOwner(document);
       if (document.retention !== undefined) {
         requireObject(document.retention, 'document.retention');
         rejectCallerOwner(document.retention);
@@ -193,6 +210,11 @@ export function createGatewayServer({ storage, authenticator, embed, max_body_by
 
   async function handle(request, response) {
     const url = new URL(request.url ?? '/', 'http://gateway.invalid');
+    // Authenticate before routing so an unauthenticated caller cannot map the route table.
+    let identity = { owner_id: null };
+    if (!UNAUTHENTICATED_PATHS.has(url.pathname)) {
+      identity = authenticator.authenticate(request.headers);
+    }
     const allowed = paths.get(url.pathname);
     if (allowed === undefined) {
       throw new GatewayError(404, 'not_found', 'No such route');
@@ -203,15 +225,14 @@ export function createGatewayServer({ storage, authenticator, embed, max_body_by
       error.headers = { allow: [...allowed].join(', ') };
       throw error;
     }
-    if (!UNAUTHENTICATED_PATHS.has(url.pathname)) {
-      const { owner_id } = authenticator.authenticate(request.headers);
+    if (identity.owner_id !== null) {
       if (request.method === 'POST') {
         const body = await readJsonBody(request, max_body_bytes);
         requireObject(body, 'body');
         rejectCallerOwner(body);
-        return await handler({ body, query: url.searchParams, owner_id });
+        return await handler({ body, query: url.searchParams, owner_id: identity.owner_id });
       }
-      return await handler({ body: {}, query: url.searchParams, owner_id });
+      return await handler({ body: {}, query: url.searchParams, owner_id: identity.owner_id });
     }
     return await handler({ body: {}, query: url.searchParams, owner_id: null });
   }
@@ -220,13 +241,16 @@ export function createGatewayServer({ storage, authenticator, embed, max_body_by
     handle(request, response)
       .then((result) => send(response, result.status, result.body))
       .catch((error) => {
-        const { status, body } = errorPayload(error);
-        const headers = error instanceof GatewayError && error.headers ? error.headers : {};
+        const mapped = mapSeamFailure(error) ?? error;
+        const { status, body } = errorPayload(mapped);
+        const headers = mapped instanceof GatewayError && mapped.headers ? mapped.headers : {};
         if (response.headersSent) {
           response.destroy();
           return;
         }
-        send(response, status, body, headers);
+        // An oversized body was refused without reading it, so the connection cannot be reused safely.
+        send(response, status, body, status === 413 ? { ...headers, connection: 'close' } : headers);
+        if (status === 413) request.destroy();
       });
   });
   server.headersTimeout = 5000;
