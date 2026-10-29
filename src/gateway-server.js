@@ -1,5 +1,6 @@
 import { createServer } from 'node:http';
 
+import { answerQuestion } from './answer-question.js';
 import { GatewayError, errorPayload } from './gateway-error.js';
 import { describeRetrievalMode, segmentDocument } from './index.js';
 
@@ -11,7 +12,9 @@ const UNAUTHENTICATED_PATHS = new Set(['/healthz', '/readyz']);
 const SEAM_FAILURES = [
   { pattern: /^embedding model is not registered$/u, status: 400, code: 'invalid_request' },
   { pattern: /^unknown or foreign collection for this owner$/u, status: 400, code: 'invalid_request' },
-  { pattern: /^document belongs to a different owner$/u, status: 409, code: 'conflict' }
+  { pattern: /^document belongs to a different owner$/u, status: 409, code: 'conflict' },
+  { pattern: /^chat request timed out$/u, status: 504, code: 'model_timeout' },
+  { pattern: /^chat request failed/u, status: 502, code: 'model_failed' }
 ];
 
 function mapSeamFailure(error) {
@@ -93,7 +96,7 @@ function send(response, status, payload, extraHeaders = {}) {
   response.end(serialized);
 }
 
-export function createGatewayServer({ storage, authenticator, embed, max_body_bytes = MAX_BODY_BYTES } = {}) {
+export function createGatewayServer({ storage, authenticator, embed, chat, max_body_bytes = MAX_BODY_BYTES } = {}) {
   if (storage === undefined || storage === null) {
     throw new TypeError('storage is required');
   }
@@ -102,6 +105,9 @@ export function createGatewayServer({ storage, authenticator, embed, max_body_by
   }
   if (embed !== undefined && typeof embed !== 'function') {
     throw new TypeError('embed must be a function when provided');
+  }
+  if (chat !== undefined && typeof chat !== 'function') {
+    throw new TypeError('chat must be a function when provided');
   }
   if (!Number.isInteger(max_body_bytes) || max_body_bytes < 1) {
     throw new TypeError('max_body_bytes must be a positive integer');
@@ -168,6 +174,26 @@ export function createGatewayServer({ storage, authenticator, embed, max_body_by
       }
       const result = await storage.revalidateCitations(body.citations, { owner_id });
       return { status: 200, body: result };
+    },
+
+    'POST /v1/answers': async ({ body, owner_id }) => {
+      if (chat === undefined) {
+        throw new GatewayError(503, 'answers_unavailable', 'No answer model is configured');
+      }
+      return {
+        status: 200,
+        body: await answerQuestion({
+          storage,
+          chat,
+          embed,
+          question: body.question,
+          owner_id,
+          collection_ids: optionalCollectionIds(body),
+          model_id: body.model_id,
+          limit: body.limit ?? 6,
+          max_tokens: body.max_tokens ?? 600
+        })
+      };
     },
 
     'GET /v1/models': async ({ query, owner_id }) => {

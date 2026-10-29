@@ -135,3 +135,80 @@ test('refuses a document that another owner already holds', { skip: !pool }, asy
     await pool.query('DELETE FROM documents WHERE document_id = $1', [document_id]);
   }
 });
+
+test('answers a question from real evidence with a fake chat adapter', { skip: !pool }, async () => {
+  const storage = createStorage({ pool });
+  const document_id = 'urn:document:gateway-answer-integration';
+  await pool.query('DELETE FROM documents WHERE owner_id = $1', [owner_id]);
+  await pool.query('DELETE FROM collections WHERE owner_id = $1', [owner_id]);
+  await storage.createCollection({ collection_id, owner_id, created_at: '2026-01-06T00:00:00Z' });
+
+  const document = {
+    document_id,
+    text: 'The invoice alpha is filed under the contract beta.',
+    source_label: 'gateway-answer-integration.txt',
+    source_hash: `sha256:${'ab'.repeat(32)}`,
+    lineage: { parser: 'synthetic-parser@1.0.0', model: null },
+    created_at: '2026-01-06T00:00:00Z',
+    retention: { owner_id, state: 'active' },
+    collections: [collection_id]
+  };
+  await storage.saveDocumentAndSegments(document, segmentDocument(document, { max_segment_chars: 200 }));
+
+  const prompts = [];
+  const gateway = createGatewayServer({
+    storage,
+    authenticator: createAuthenticator({ token, owner_id, shell_users: {} }),
+    chat: async (input) => {
+      prompts.push(input);
+      return 'The invoice alpha is filed under contract beta [1].';
+    }
+  });
+  const { url } = await gateway.start({ port: 0 });
+  try {
+    const answer = await call(url, '/v1/answers', {
+      method: 'POST',
+      body: { question: 'invoice alpha', collection_ids: [collection_id] }
+    });
+    assert.equal(answer.status, 200, JSON.stringify(answer.body));
+    assert.equal(answer.body.citations.length, 1, JSON.stringify(answer.body));
+    assert.equal(answer.body.citations[0].document_id, document_id);
+    assert.equal(answer.body.citations[0].citation.source_hash, document.source_hash);
+    assert.deepEqual(answer.body.stale_citations, []);
+    assert.deepEqual(answer.body.uncertainty, {
+      level: 'low',
+      mode: 'lexical',
+      evidence_count: 1,
+      cited_count: 1,
+      unresolved_count: 0,
+      stale_count: 0
+    });
+    assert.equal(prompts.length, 1);
+    assert.equal(prompts[0].messages[1].content.includes('invoice alpha'), true);
+
+    const unanswered = await call(url, '/v1/answers', {
+      method: 'POST',
+      body: { question: 'zzz-no-such-term' }
+    });
+    assert.equal(unanswered.status, 200);
+    assert.equal(unanswered.body.uncertainty.level, 'unsupported');
+    assert.equal(prompts.length, 1, 'no model call without evidence');
+
+    const stale = await pool.query('UPDATE documents SET source_hash = $2 WHERE document_id = $1', [
+      document_id,
+      `sha256:${'cd'.repeat(32)}`
+    ]);
+    assert.equal(stale.rowCount, 1);
+    const staleAnswer = await call(url, '/v1/answers', {
+      method: 'POST',
+      body: { question: 'invoice alpha' }
+    });
+    assert.equal(staleAnswer.status, 200);
+    assert.equal(staleAnswer.body.uncertainty.level, 'high');
+    assert.equal(staleAnswer.body.stale_citations.length, 1);
+  } finally {
+    await gateway.stop();
+    await pool.query('DELETE FROM documents WHERE owner_id = $1', [owner_id]);
+    await pool.query('DELETE FROM collections WHERE owner_id = $1', [owner_id]);
+  }
+});

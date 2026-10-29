@@ -2,7 +2,7 @@
 
 import pg from 'pg';
 
-import { createOpenAICompatibleEmbedder, createStorage } from './index.js';
+import { createOpenAICompatibleChat, createOpenAICompatibleEmbedder, createStorage } from './index.js';
 import { createAuthenticator } from './gateway-auth.js';
 import { loadGatewayConfig } from './gateway-config.js';
 import { createGatewayServer } from './gateway-server.js';
@@ -22,8 +22,16 @@ const embed = process.env.EMBEDDING_BASE_URL === undefined
     api_key: process.env.EMBEDDING_API_KEY
   });
 
+const chat = process.env.ANSWER_BASE_URL === undefined
+  ? undefined
+  : createOpenAICompatibleChat({
+    base_url: process.env.ANSWER_BASE_URL,
+    api_key: process.env.ANSWER_API_KEY
+  });
+
 const gateway = createGatewayServer({
   storage: createStorage({ pool }),
+  chat,
   authenticator: createAuthenticator({
     token: config.token,
     owner_id: config.owner_id,
