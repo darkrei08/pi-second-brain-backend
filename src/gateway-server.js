@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
 
 import { answerQuestion } from './answer-question.js';
@@ -8,6 +9,7 @@ export const MAX_BODY_BYTES = 1024 * 1024;
 const MAX_CITATION_BATCH = 100;
 const JSON_CONTENT_TYPE = /^application\/json(?:;|$)/iu;
 const UNAUTHENTICATED_PATHS = new Set(['/healthz', '/readyz']);
+const CHAT_COMPLETION_FIELDS = new Set(['model', 'messages', 'stream', 'collection_ids', 'embedding_model_id', 'limit', 'max_tokens']);
 // Seam errors with a stable message that means the caller sent something unusable.
 const SEAM_FAILURES = [
   { pattern: /^embedding model is not registered$/u, status: 400, code: 'invalid_request' },
@@ -87,6 +89,47 @@ function optionalCollectionIds(body) {
     throw new GatewayError(400, 'invalid_request', 'collection_ids must be a non-empty array');
   }
   return body.collection_ids;
+}
+
+function chatCompletionQuestion(body) {
+  for (const key of Object.keys(body)) {
+    if (!CHAT_COMPLETION_FIELDS.has(key)) {
+      throw new GatewayError(400, 'invalid_request', `Unsupported chat completion field: ${key}`);
+    }
+  }
+  if (typeof body.model !== 'string' || body.model.trim() === '') {
+    throw new GatewayError(400, 'invalid_request', 'model must be non-empty text');
+  }
+  if (body.stream !== undefined && body.stream !== false) {
+    throw new GatewayError(400, 'invalid_request', 'streaming is not enabled');
+  }
+  if (body.limit !== undefined && (!Number.isInteger(body.limit) || body.limit < 1 || body.limit > 100)) {
+    throw new GatewayError(400, 'invalid_request', 'limit must be an integer between 1 and 100');
+  }
+  if (body.max_tokens !== undefined && (!Number.isInteger(body.max_tokens) || body.max_tokens < 1 || body.max_tokens > 8192)) {
+    throw new GatewayError(400, 'invalid_request', 'max_tokens must be an integer between 1 and 8192');
+  }
+  if (body.embedding_model_id !== undefined && (typeof body.embedding_model_id !== 'string' || body.embedding_model_id.trim() === '')) {
+    throw new GatewayError(400, 'invalid_request', 'embedding_model_id must be non-empty text');
+  }
+  if (!Array.isArray(body.messages) || body.messages.length !== 1) {
+    throw new GatewayError(400, 'invalid_request', 'messages must contain exactly one user message');
+  }
+  const [message] = body.messages;
+  if (message === null || typeof message !== 'object' || Array.isArray(message) || message.role !== 'user' || typeof message.content !== 'string' || message.content.trim() === '') {
+    throw new GatewayError(400, 'invalid_request', 'messages must contain exactly one non-empty user message');
+  }
+  return message.content;
+}
+
+function answerMetadata(answer) {
+  return {
+    citations: answer.citations,
+    unresolved_citations: answer.unresolved_citations,
+    stale_citations: answer.stale_citations,
+    retrieval: answer.retrieval,
+    uncertainty: answer.uncertainty
+  };
 }
 
 function send(response, status, payload, extraHeaders = {}) {
@@ -202,6 +245,35 @@ export function createGatewayServer({ storage, authenticator, embed, chat, answe
           limit: body.limit ?? 6,
           max_tokens: body.max_tokens ?? 600
         })
+      };
+    },
+
+    'POST /v1/chat/completions': async ({ body, owner_id }) => {
+      if (chat === undefined || answer_model === undefined) {
+        throw new GatewayError(503, 'answers_unavailable', 'No answer model is configured');
+      }
+      const answer = await answerQuestion({
+        storage,
+        chat,
+        embed,
+        question: chatCompletionQuestion(body),
+        owner_id,
+        collection_ids: optionalCollectionIds(body),
+        model_id: answer_model,
+        embedding_model_id: embed === undefined ? undefined : body.embedding_model_id,
+        limit: body.limit ?? 6,
+        max_tokens: body.max_tokens ?? 600
+      });
+      return {
+        status: 200,
+        body: {
+          id: `chatcmpl-${randomUUID()}`,
+          object: 'chat.completion',
+          created: Math.floor(Date.now() / 1000),
+          model: answer_model,
+          choices: [{ index: 0, message: { role: 'assistant', content: answer.answer }, finish_reason: 'stop' }],
+          answer_metadata: answerMetadata(answer)
+        }
       };
     },
 

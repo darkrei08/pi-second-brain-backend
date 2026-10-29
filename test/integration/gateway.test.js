@@ -187,13 +187,29 @@ test('answers a question from real evidence with a fake chat adapter', { skip: !
     assert.equal(prompts.length, 1);
     assert.equal(prompts[0].messages[1].content.includes('invoice alpha'), true);
 
+    const completion = await call(url, '/v1/chat/completions', {
+      method: 'POST',
+      body: {
+        model: 'client-model-is-ignored',
+        messages: [{ role: 'user', content: 'invoice alpha' }],
+        collection_ids: [collection_id]
+      }
+    });
+    assert.equal(completion.status, 200, JSON.stringify(completion.body));
+    assert.equal(completion.body.object, 'chat.completion');
+    assert.equal(completion.body.choices[0].message.role, 'assistant');
+    assert.equal(completion.body.choices[0].message.content, 'The invoice alpha is filed under contract beta [1].');
+    assert.equal(completion.body.answer_metadata.citations[0].document_id, document_id);
+    assert.equal(completion.body.answer_metadata.uncertainty.level, 'low');
+    assert.equal(prompts[1].model_id, 'synthetic-chat');
+
     const unanswered = await call(url, '/v1/answers', {
       method: 'POST',
       body: { question: 'zzz-no-such-term' }
     });
     assert.equal(unanswered.status, 200);
     assert.equal(unanswered.body.uncertainty.level, 'unsupported');
-    assert.equal(prompts.length, 1, 'no model call without evidence');
+    assert.equal(prompts.length, 2, 'no model call without evidence');
 
     const stale = await pool.query('UPDATE documents SET source_hash = $2 WHERE document_id = $1', [
       document_id,

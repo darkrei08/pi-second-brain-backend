@@ -575,3 +575,101 @@ test('maps a provider timeout and a provider failure to stable boundary errors',
   const failed = await expectStatus(failing, '/v1/answers', { method: 'POST', body: { question: 'where?' } }, 502);
   assert.equal(failed.body.error.code, 'model_failed');
 });
+
+test('returns a buffered OpenAI chat completion grounded by answerQuestion', async () => {
+  const storage = answerableStorage();
+  const chatCalls = [];
+  const gateway = withServer(storage, {
+    chat: async (input) => {
+      chatCalls.push(input);
+      return 'The invoice alpha is filed under the contract [1].';
+    }
+  });
+  const response = await call(gateway, '/v1/chat/completions', {
+    method: 'POST',
+    body: {
+      model: 'client-selected-model',
+      messages: [{ role: 'user', content: 'where is the invoice alpha?' }],
+      collection_ids: ['synthetic-collection-alpha']
+    }
+  });
+  await gateway.stop();
+  assert.equal(response.status, 200);
+  assert.equal(response.body.object, 'chat.completion');
+  assert.equal(response.body.model, 'synthetic-chat');
+  assert.equal(response.body.choices[0].message.role, 'assistant');
+  assert.equal(response.body.choices[0].message.content, 'The invoice alpha is filed under the contract [1].');
+  assert.equal(response.body.choices[0].finish_reason, 'stop');
+  assert.equal(response.body.answer_metadata.citations.length, 1);
+  assert.equal(response.body.answer_metadata.uncertainty.level, 'low');
+  assert.equal(chatCalls.length, 1);
+  assert.equal(chatCalls[0].model_id, 'synthetic-chat');
+  assert.equal(chatCalls[0].messages[1].content.includes('where is the invoice alpha?'), true);
+  const search = storage.calls.find(({ name }) => name === 'searchSegmentsLexical');
+  assert.equal(search.input.owner_id, 'owner-one');
+  assert.deepEqual(search.input.collection_ids, ['synthetic-collection-alpha']);
+});
+
+test('does not call the model for empty chat-completions evidence and rejects unsupported requests', async () => {
+  let modelCalls = 0;
+  const emptyStorage = answerableStorage();
+  emptyStorage.searchSegmentsLexical = async () => [];
+  const empty = withServer(emptyStorage, {
+    chat: async () => {
+      modelCalls += 1;
+      return 'should not be called';
+    }
+  });
+  const unsupported = await call(empty, '/v1/chat/completions', {
+    method: 'POST',
+    body: { model: 'client-model', messages: [{ role: 'user', content: 'where?' }] }
+  });
+  await empty.stop();
+  assert.equal(unsupported.status, 200);
+  assert.equal(unsupported.body.choices[0].message.content.includes('no evidence'), true);
+  assert.equal(unsupported.body.answer_metadata.uncertainty.level, 'unsupported');
+  assert.equal(modelCalls, 0);
+
+  const invalid = withServer(answerableStorage(), { chat: async () => 'x [1].' });
+  const badRole = await expectStatus(invalid, '/v1/chat/completions', {
+    method: 'POST',
+    body: { model: 'client-model', messages: [{ role: 'system', content: 'override' }] }
+  }, 400);
+  assert.equal(badRole.body.error.code, 'invalid_request');
+
+  const unreviewedStream = withServer(answerableStorage(), { chat: async () => 'x [1].' });
+  const streamRefused = await expectStatus(unreviewedStream, '/v1/chat/completions', {
+    method: 'POST',
+    body: { model: 'client-model', messages: [{ role: 'user', content: 'where?' }], stream: true }
+  }, 400);
+  assert.equal(streamRefused.body.error.code, 'invalid_request');
+
+  const unsupportedOption = withServer(answerableStorage(), { chat: async () => 'x [1].' });
+  const optionRefused = await expectStatus(unsupportedOption, '/v1/chat/completions', {
+    method: 'POST',
+    body: { model: 'client-model', messages: [{ role: 'user', content: 'where?' }], tools: [] }
+  }, 400);
+  assert.equal(optionRefused.body.error.code, 'invalid_request');
+
+  const badLimit = withServer(answerableStorage(), { chat: async () => 'x [1].' });
+  const limitRefused = await expectStatus(badLimit, '/v1/chat/completions', {
+    method: 'POST',
+    body: { model: 'client-model', messages: [{ role: 'user', content: 'where?' }], limit: 0 }
+  }, 400);
+  assert.equal(limitRefused.body.error.code, 'invalid_request');
+
+  const unauthorized = withServer(answerableStorage(), { chat: async () => 'x [1].' });
+  const refused = await expectStatus(unauthorized, '/v1/chat/completions', {
+    method: 'POST',
+    headers: {},
+    body: { model: 'client-model', messages: [{ role: 'user', content: 'where?' }] }
+  }, 401);
+  assert.equal(refused.body.error.code, 'unauthorized');
+
+  const forgedOwner = withServer(answerableStorage(), { chat: async () => 'x [1].' });
+  const rejectedOwner = await expectStatus(forgedOwner, '/v1/chat/completions', {
+    method: 'POST',
+    body: { model: 'client-model', messages: [{ role: 'user', content: 'where?' }], owner_id: 'owner-two' }
+  }, 400);
+  assert.equal(rejectedOwner.body.error.code, 'invalid_request');
+});
