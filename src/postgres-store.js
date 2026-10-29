@@ -4,6 +4,7 @@ const DOCUMENT_ID_PATTERN = /^urn:document:[A-Za-z0-9][A-Za-z0-9._~-]*$/;
 const HASH_PATTERN = /^sha256:[0-9a-f]{64}$/;
 const OPAQUE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._~-]*$/;
 const RETENTION_STATES = new Set(['active', 'tombstone', 'purged']);
+const EMBEDDING_MODEL_STATUSES = new Set(['active', 'deprecated']);
 const RFC3339_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/u;
 
 function requirePool(pool) {
@@ -87,6 +88,47 @@ function validateQueryEmbedding({ query_embedding, model_id, owner_id, limit }) 
   if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
     throw new TypeError('limit must be an integer between 1 and 100');
   }
+}
+
+function validateEmbeddingModelInput(input) {
+  requireObject(input, 'input');
+  const { model_id, dimensions, status = 'active' } = input;
+  requireOpaqueId(model_id, 'model_id');
+  if (!Number.isInteger(dimensions) || dimensions < 1 || dimensions > MAX_VECTOR_DIMENSIONS) {
+    throw new TypeError(`dimensions must be an integer between 1 and ${MAX_VECTOR_DIMENSIONS}`);
+  }
+  if (!EMBEDDING_MODEL_STATUSES.has(status)) {
+    throw new TypeError('status must be active or deprecated');
+  }
+  return { model_id, dimensions, status };
+}
+
+function validateEmbeddingCoverageInput(input) {
+  requireObject(input, 'input');
+  requireOpaqueId(input.model_id, 'model_id');
+  requireOpaqueId(input.owner_id, 'owner_id');
+  return { model_id: input.model_id, owner_id: input.owner_id };
+}
+
+function mapEmbeddingModel(row) {
+  return {
+    model_id: row.model_id,
+    dimensions: row.dimensions,
+    status: row.status
+  };
+}
+
+function mapEmbeddingCoverage(row) {
+  return {
+    model_id: row.model_id,
+    owner_id: row.owner_id,
+    status: row.status,
+    dimensions: row.dimensions,
+    total_segments: row.total_segments,
+    embedded_segments: row.embedded_segments,
+    missing_segments: row.missing_segments,
+    dimension_mismatch_segments: row.dimension_mismatch_segments
+  };
 }
 
 function validateCitationRevalidationInput({ citations, owner_id }) {
@@ -316,6 +358,119 @@ export function createStorage({ pool }) {
       } finally {
         client.release();
       }
+    },
+
+    async registerEmbeddingModel(input) {
+      const model = validateEmbeddingModelInput(input);
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        let existing = await client.query(`
+          SELECT model_id, dimensions, status
+          FROM embedding_models
+          WHERE model_id = $1
+          FOR UPDATE
+        `, [model.model_id]);
+        if (existing.rowCount === 0) {
+          const inserted = await client.query(`
+            INSERT INTO embedding_models (model_id, dimensions, status)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (model_id) DO NOTHING
+            RETURNING model_id, dimensions, status
+          `, [model.model_id, model.dimensions, model.status]);
+          if (inserted.rowCount === 1) {
+            await client.query('COMMIT');
+            return mapEmbeddingModel(inserted.rows[0]);
+          }
+          existing = await client.query(`
+            SELECT model_id, dimensions, status
+            FROM embedding_models
+            WHERE model_id = $1
+            FOR UPDATE
+          `, [model.model_id]);
+        }
+        if (existing.rowCount !== 1 || existing.rows[0].dimensions !== model.dimensions) {
+          throw new Error('embedding model metadata conflicts with the existing registry record');
+        }
+        const current = existing.rows[0];
+        if (current.status === model.status) {
+          await client.query('COMMIT');
+          return mapEmbeddingModel(current);
+        }
+        if (current.status !== 'active' || model.status !== 'deprecated') {
+          throw new Error('deprecated embedding models cannot be reactivated');
+        }
+        const updated = await client.query(`
+          UPDATE embedding_models
+          SET status = 'deprecated'
+          WHERE model_id = $1 AND status = 'active'
+          RETURNING model_id, dimensions, status
+        `, [model.model_id]);
+        if (updated.rowCount !== 1) {
+          throw new Error('embedding model status changed concurrently');
+        }
+        await client.query('COMMIT');
+        return mapEmbeddingModel(updated.rows[0]);
+      } catch (error) {
+        try {
+          await client.query('ROLLBACK');
+        } catch {
+          // Preserve the original database error.
+        }
+        throw error;
+      } finally {
+        client.release();
+      }
+    },
+
+    async getEmbeddingModel(model_id) {
+      requireOpaqueId(model_id, 'model_id');
+      const { rows } = await pool.query(
+        'SELECT model_id, dimensions, status FROM embedding_models WHERE model_id = $1',
+        [model_id]
+      );
+      return rows.length === 1 ? mapEmbeddingModel(rows[0]) : null;
+    },
+
+    async listEmbeddingModels() {
+      const { rows } = await pool.query(
+        'SELECT model_id, dimensions, status FROM embedding_models ORDER BY model_id',
+        []
+      );
+      return rows.map(mapEmbeddingModel);
+    },
+
+    async inspectEmbeddingCoverage(input) {
+      const { model_id, owner_id } = validateEmbeddingCoverageInput(input);
+      const { rows } = await pool.query(`
+        SELECT
+          m.model_id,
+          $2::text AS owner_id,
+          m.status,
+          m.dimensions,
+          COUNT(s.id)::int AS total_segments,
+          COUNT(s.id) FILTER (
+            WHERE e.segment_id IS NOT NULL AND e.dimensions = m.dimensions
+          )::int AS embedded_segments,
+          COUNT(s.id) FILTER (WHERE e.segment_id IS NULL)::int AS missing_segments,
+          COUNT(s.id) FILTER (
+            WHERE e.segment_id IS NOT NULL AND e.dimensions <> m.dimensions
+          )::int AS dimension_mismatch_segments
+        FROM embedding_models AS m
+        LEFT JOIN documents AS d
+          ON d.owner_id = $2
+         AND d.retention_state = 'active'
+        LEFT JOIN segments AS s ON s.document_id = d.document_id
+        LEFT JOIN segment_embeddings AS e
+          ON e.segment_id = s.id
+         AND e.model_id = m.model_id
+        WHERE m.model_id = $1
+        GROUP BY m.model_id, m.status, m.dimensions
+      `, [model_id, owner_id]);
+      if (rows.length !== 1) {
+        throw new Error('embedding model is not registered');
+      }
+      return mapEmbeddingCoverage(rows[0]);
     },
 
     async saveSegmentEmbeddings(input) {

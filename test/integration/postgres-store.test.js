@@ -81,6 +81,12 @@ test('rejects malformed semantic input before connecting', async () => {
     created_at: document.created_at
   };
 
+  await assert.rejects(storage.registerEmbeddingModel({ model_id: '../model', dimensions: 3 }), /model_id/);
+  await assert.rejects(storage.registerEmbeddingModel({ model_id: 'synthetic-3d', dimensions: 0 }), /dimensions/);
+  await assert.rejects(storage.registerEmbeddingModel({ model_id: 'synthetic-3d', dimensions: 3, status: 'unknown' }), /status/);
+  await assert.rejects(storage.getEmbeddingModel('../model'), /model_id/);
+  await assert.rejects(storage.inspectEmbeddingCoverage({ model_id: '../model', owner_id: document.retention.owner_id }), /model_id/);
+  await assert.rejects(storage.inspectEmbeddingCoverage({ model_id: 'synthetic-3d', owner_id: '../owner' }), /owner_id/);
   await assert.rejects(storage.saveSegmentEmbeddings({ ...valid, dimensions: 0 }), /dimensions/);
   await assert.rejects(storage.saveSegmentEmbeddings({ ...valid, model_id: '../model' }), /model_id/);
   await assert.rejects(storage.saveSegmentEmbeddings({ ...valid, embeddings: [valid.embeddings[0], valid.embeddings[0]] }), /duplicate/);
@@ -294,6 +300,117 @@ integrationTest('stores exact model-scoped cosine results and replaces embedding
   });
   assert.deepEqual(replaced.slice(0, 2).map((match) => match.segment_index), [0, 1]);
 
+  await removeDocument(semanticDocument.document_id, semanticDocument.retention.owner_id);
+});
+
+integrationTest('registers global models and reports owner-scoped partial coverage', async () => {
+  const storage = createStorage({ pool });
+  const coverageModel = 'coverage-3d';
+  const mismatchModel = 'coverage-mismatch';
+  await pool.query('DELETE FROM embedding_models WHERE model_id = ANY($1::text[])', [[coverageModel, mismatchModel]]);
+  await removeDocument(semanticDocument.document_id, semanticDocument.retention.owner_id);
+  await storage.saveDocumentAndSegments(semanticDocument, semanticResult);
+
+  assert.deepEqual(
+    await Promise.all([
+      storage.registerEmbeddingModel({ model_id: coverageModel, dimensions: 3 }),
+      storage.registerEmbeddingModel({ model_id: coverageModel, dimensions: 3 })
+    ]),
+    [
+      { model_id: coverageModel, dimensions: 3, status: 'active' },
+      { model_id: coverageModel, dimensions: 3, status: 'active' }
+    ]
+  );
+  await assert.rejects(
+    storage.registerEmbeddingModel({ model_id: coverageModel, dimensions: 4 }),
+    /conflicts/
+  );
+  assert.deepEqual(await storage.getEmbeddingModel(coverageModel), { model_id: coverageModel, dimensions: 3, status: 'active' });
+
+  await storage.saveSegmentEmbeddings({
+    document_id: semanticDocument.document_id,
+    owner_id: semanticDocument.retention.owner_id,
+    model_id: coverageModel,
+    dimensions: 3,
+    embeddings: [{ segment_id: semanticResult.segments[0].id, embedding: semanticVectors3d[0] }],
+    created_at: semanticDocument.created_at
+  });
+  assert.deepEqual(
+    await storage.inspectEmbeddingCoverage({ model_id: coverageModel, owner_id: semanticDocument.retention.owner_id }),
+    {
+      model_id: coverageModel,
+      owner_id: semanticDocument.retention.owner_id,
+      status: 'active',
+      dimensions: 3,
+      total_segments: 3,
+      embedded_segments: 1,
+      missing_segments: 2,
+      dimension_mismatch_segments: 0
+    }
+  );
+
+  assert.deepEqual(
+    await storage.registerEmbeddingModel({ model_id: mismatchModel, dimensions: 4 }),
+    { model_id: mismatchModel, dimensions: 4, status: 'active' }
+  );
+  await storage.saveSegmentEmbeddings({
+    document_id: semanticDocument.document_id,
+    owner_id: semanticDocument.retention.owner_id,
+    model_id: mismatchModel,
+    dimensions: 3,
+    embeddings: [{ segment_id: semanticResult.segments[1].id, embedding: semanticVectors3d[1] }],
+    created_at: semanticDocument.created_at
+  });
+  assert.deepEqual(
+    await storage.inspectEmbeddingCoverage({ model_id: mismatchModel, owner_id: semanticDocument.retention.owner_id }),
+    {
+      model_id: mismatchModel,
+      owner_id: semanticDocument.retention.owner_id,
+      status: 'active',
+      dimensions: 4,
+      total_segments: 3,
+      embedded_segments: 0,
+      missing_segments: 2,
+      dimension_mismatch_segments: 1
+    }
+  );
+
+  assert.deepEqual(
+    await Promise.all([
+      storage.registerEmbeddingModel({ model_id: coverageModel, dimensions: 3, status: 'deprecated' }),
+      storage.registerEmbeddingModel({ model_id: coverageModel, dimensions: 3, status: 'deprecated' })
+    ]),
+    [
+      { model_id: coverageModel, dimensions: 3, status: 'deprecated' },
+      { model_id: coverageModel, dimensions: 3, status: 'deprecated' }
+    ]
+  );
+  await assert.rejects(
+    storage.registerEmbeddingModel({ model_id: coverageModel, dimensions: 3 }),
+    /reactivated/
+  );
+  assert.deepEqual(
+    (await storage.listEmbeddingModels()).map(({ model_id }) => model_id),
+    [coverageModel, mismatchModel]
+  );
+
+  await pool.query(
+    "UPDATE documents SET retention_state = 'tombstone' WHERE document_id = $1 AND owner_id = $2",
+    [semanticDocument.document_id, semanticDocument.retention.owner_id]
+  );
+  assert.deepEqual(
+    await storage.inspectEmbeddingCoverage({ model_id: coverageModel, owner_id: semanticDocument.retention.owner_id }),
+    {
+      model_id: coverageModel,
+      owner_id: semanticDocument.retention.owner_id,
+      status: 'deprecated',
+      dimensions: 3,
+      total_segments: 0,
+      embedded_segments: 0,
+      missing_segments: 0,
+      dimension_mismatch_segments: 0
+    }
+  );
   await removeDocument(semanticDocument.document_id, semanticDocument.retention.owner_id);
 });
 
