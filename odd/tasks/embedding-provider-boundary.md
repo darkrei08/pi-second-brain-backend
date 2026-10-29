@@ -12,10 +12,10 @@ Fill the `embed` injection point consumed by the backfill worker with an OpenAI-
 
 ## Tasks
 
-- T1 | S1-S2 | Recover the checkpoint and define the provider-boundary wayfinder | route: `.scratch/embedding-provider-boundary` | commit: `pending-definition`
-- T2 | S2-S4 | Add `createOpenAICompatibleEmbedder` with injected fetch, secret-safe errors, and response validation | route: `src/embedding-client.js`, `src/index.js`, `test/embedding-client.test.js` | commit: `pending-implementation`
-- T3 | S3-S4 | Document the adapter, its protocol rationale, and its limits | route: `docs/retrieval-and-graph.md` | commit: `pending-implementation`
-- T4 | S1-S5 | Verify host suite, container matrix, secret leakage, and composition with the worker | route: tests and checks | commit: `pending-implementation`
+- T1 | S1-S2 | Recover the checkpoint and define the provider-boundary wayfinder | route: `.scratch/embedding-provider-boundary` | commit: `652eb4c`
+- T2 | S2-S4 | Add `createOpenAICompatibleEmbedder` with injected fetch, secret-safe errors, and response validation | route: `src/embedding-client.js`, `src/index.js`, `test/embedding-client.test.js` | commit: `d80d0b0`
+- T3 | S3-S4 | Document the adapter, its protocol rationale, and its limits | route: `docs/retrieval-and-graph.md` | commit: `d80d0b0`
+- T4 | S1-S5 | Verify host suite, container matrix, secret leakage, and composition with the worker | route: tests and checks | commit: `d80d0b0`
 
 ## Log
 
@@ -30,3 +30,4 @@ Fill the `embed` injection point consumed by the backfill worker with an OpenAI-
 - L8: The second verification round (canonical `verifier-model`) found one more leak path - an arbitrary `error.code` reflected into the message - plus two wording mismatches on timeout scope and the key charset; the code echo is now limited to `^[A-Z0-9_]{1,40}$` and the wording matches the code.
 - L9: Verification evidence: `test/embedding-client.test.js` 8/8; full host suite 34 pass / 11 expected skips; Debian and Alpine Node 22 matrix identical with 32 pass / 11 skips and a network-free entry-point import; composition with `runEmbeddingBackfill` asserted in a unit test.
 - L10: No third independent round after the final one-line `error.code` guard and wording fixes; local suite green. Retries, rate limits, batching, cost control, credential retrieval, and a live provider call remain deferred.
+- L11: Work-unit boundary: definition `652eb4c`, implementation with tests and docs `d80d0b0`, closure in the following commit. Both adversarial rounds used the canonical pi-ext-roles aliases (`reviewer-model`, `verifier-model`) with `retries: 1` as the only failover path, not the session default model.
