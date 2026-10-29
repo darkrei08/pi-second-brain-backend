@@ -12,10 +12,10 @@ Name how a set of matches was produced (hybrid, lexical, or empty) so the select
 
 ## Tasks
 
-- T1 | S1-S2 | Compare the candidate designs for fallback orchestration and record the choice | route: `.scratch/retrieval-mode` | commit: pending
-- T2 | S2-S3 | Add `describeRetrievalMode` with fail-closed rank handling | route: `src/retrieval-mode.js`, `src/index.js`, `test/retrieval-mode.test.js` | commit: pending
-- T3 | S3-S4 | Document the mode contract next to the hybrid seam | route: `docs/retrieval-and-graph.md` | commit: pending
-- T4 | S1-S5 | Verify host suite, container matrix, and an independent contract review | route: tests and checks | commit: pending
+- T1 | S1-S2 | Compare the candidate designs for fallback orchestration and record the choice | route: `.scratch/retrieval-mode` | commit: `451031e`
+- T2 | S2-S3 | Add `describeRetrievalMode` with fail-closed rank handling | route: `src/retrieval-mode.js`, `src/index.js`, `test/retrieval-mode.test.js` | commit: `4aafd7f`
+- T3 | S3-S4 | Document the mode contract next to the hybrid seam | route: `docs/retrieval-and-graph.md` | commit: `4aafd7f`
+- T4 | S1-S5 | Verify host suite, pgvector integration, and an independent design and contract review | route: tests and checks | commit: `4aafd7f`
 
 ## Log
 
@@ -24,3 +24,5 @@ Name how a set of matches was produced (hybrid, lexical, or empty) so the select
 - L3: The remaining frontier has two classes: operational work blocked on product decisions (worker scheduling, coverage threshold, TTL/pruning, credentials, graph, gateway) and unblocked work. The congruent next slice is the one that completes the policy already chosen at the registry step without inventing a new rule.
 - L4: A design review of the first draft found that a `semantic_fallback` flag overclaims: hybrid fusion caps output at `limit`, so semantic candidates can lose the cut and a fully covered model would be labelled degraded. The flag was removed in favour of `semantic_matches`, the contract now states it reports evidence and not coverage, and the integration test feeds real store output through the function.
 - L5: Compared three designs. Per-query coverage gate with a percentage threshold: rejected, because coverage costs about 332 ms at 60k segments (67 ms for one plan page) and the threshold would be an invented product rule. Query embedding inside retrieval: rejected, it would put provider credentials inside the storage seam. Pure annotation of matches: chosen, because `searchSegmentsHybrid` already returns `lexical_rank` and `semantic_rank` with `null` for the missing side, and that shape is pinned by an existing integration assertion.
+- L6: Verification evidence: unit file 7/7; full host suite 41 pass / 11 expected skips; live pgvector/pg17 integration 14/14 with the two new assertions that feed real `searchSegmentsHybrid` output through the function. An independent design review flagged the removed flag and two residual ambiguities (a future similarity cutoff changing the meaning of a lexical mode, and an omitted `model_id`), both neutralised by reporting evidence instead of coverage.
+- L7: Work-unit boundary: definition `451031e`, implementation with tests and docs `4aafd7f`, closure in the following commit. Threshold selection, coverage caching, answer confidence, UI labelling, and metrics remain deferred.
