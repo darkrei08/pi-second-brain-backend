@@ -9,9 +9,9 @@ Implement a pure, provider-neutral boundary that validates retrieved segment pro
 
 ## Tasks
 
-- T1 | S1-S2 | Reconcile the completed hybrid ticket and define the citation resolver contract | route: `.scratch/hybrid-retrieval`, `.scratch/citation-resolver` | commit: pending
-- T2 | S1-S2 | Implement and test `resolveCitations` | route: `src/citation-resolver.js`, `src/index.js`, `test/citation-resolver.test.js` | commit: pending
-- T3 | S1-S2 | Verify regression, PostgreSQL, packaging, container, and repository behavior | route: tests and checks | commit: pending
+- T1 | S1-S2 | Reconcile the completed hybrid ticket and define the citation resolver contract | route: `.scratch/hybrid-retrieval`, `.scratch/citation-resolver` | commit: 177abe2
+- T2 | S1-S2 | Implement and test `resolveCitations` | route: `src/citation-resolver.js`, `src/index.js`, `test/citation-resolver.test.js` | commit: 3d61852
+- T3 | S1-S2 | Verify regression, PostgreSQL, packaging, container, and repository behavior | route: tests and checks | commit: 3d61852
 
 ## Log
 
@@ -20,3 +20,6 @@ Implement a pure, provider-neutral boundary that validates retrieved segment pro
 - L3: The completed ticket is `.scratch/hybrid-retrieval/issues/01-hybrid-search.md`, implemented in `8b466dd` and closed with tracker commit `c906b16`.
 - L4: Workflow `c75704dd-0573-4f51-82f4-6820ee92c0a9` selected citation mapping/resolution as the next dependency-safe slice. It consumes hybrid retrieval provenance and precedes model lifecycle, graph retrieval, parser benchmarking, and sidecar evaluation.
 - L5: Herdr audit confirmed the repository is clean and the prior hybrid issue checklist required reconciliation; all hybrid acceptance items are now checked with verification evidence.
+- L6: Implemented pure `resolveCitations` with fail-closed owner, active-retention, hash, citation, location, lineage, confidence, and batch validation; exported it from `src/index.js`.
+- L7: Verification passed: focused citation suite 4/4; host suite 17 pass with 7 expected PostgreSQL skips; isolated pgvector/pg17 integration 9/9; Debian and Alpine Node 22.23.3 suites 17 pass with 7 expected skips; package dry-runs, syntax, privacy, Compose, and diff checks.
+- L8: Implementation and verification were committed as `3d61852` (`feat: add citation evidence resolver`).
