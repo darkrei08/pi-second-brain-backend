@@ -4,3 +4,4 @@ export { normalizeParserOutput } from './parser-adapter.js';
 export { resolveCitations } from './citation-resolver.js';
 export { runEmbeddingBackfill } from './embedding-backfill.js';
 export { createOpenAICompatibleEmbedder } from './embedding-client.js';
+export { describeRetrievalMode } from './retrieval-mode.js';

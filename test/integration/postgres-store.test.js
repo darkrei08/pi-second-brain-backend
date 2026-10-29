@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createStorage, resolveCitations, runEmbeddingBackfill, segmentDocument } from '../../src/index.js';
+import { createStorage, describeRetrievalMode, resolveCitations, runEmbeddingBackfill, segmentDocument } from '../../src/index.js';
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integrationTest = databaseUrl ? test : test.skip;
@@ -755,6 +755,12 @@ integrationTest('fuses lexical and semantic matches with deterministic isolation
   const matches = await storage.searchSegmentsHybrid(request);
   assert.deepEqual(matches.map((match) => match.segment_index), [0, 1, 2]);
   assert.deepEqual(matches.map((match) => [match.lexical_rank, match.semantic_rank]), [[1, 1], [2, null], [null, 2]]);
+  assert.deepEqual(describeRetrievalMode(matches, { model_id: 'hybrid-3d' }), {
+    mode: 'hybrid',
+    model_id: 'hybrid-3d',
+    matches: 3,
+    semantic_matches: 2
+  });
   assert.ok(Math.abs(matches[0].hybrid_score - 2 / 61) < 0.000001);
   assert.ok(Math.abs(matches[1].hybrid_score - 1 / 62) < 0.000001);
   assert.equal(matches[0].provenance.citation.ref, hybridResult.segments[0].provenance.citation.ref);
@@ -765,10 +771,14 @@ integrationTest('fuses lexical and semantic matches with deterministic isolation
   );
   assert.equal((await storage.searchSegmentsHybrid({ ...request, owner_id: tombstoneDocument.retention.owner_id })).length, 0);
   assert.equal((await storage.searchSegmentsHybrid({ ...request, owner_id: purgedDocument.retention.owner_id })).length, 0);
-  assert.deepEqual(
-    (await storage.searchSegmentsHybrid({ ...request, query_embedding: [1, 0, 0, 0], model_id: 'hybrid-4d' })).map((match) => match.semantic_rank),
-    [null, null]
-  );
+  const wrongDimensionMatches = await storage.searchSegmentsHybrid({ ...request, query_embedding: [1, 0, 0, 0], model_id: 'hybrid-4d' });
+  assert.deepEqual(wrongDimensionMatches.map((match) => match.semantic_rank), [null, null]);
+  assert.deepEqual(describeRetrievalMode(wrongDimensionMatches, { model_id: 'hybrid-4d' }), {
+    mode: 'lexical',
+    model_id: 'hybrid-4d',
+    matches: 2,
+    semantic_matches: 0
+  });
 
   await Promise.all(documents.map((entry) => removeDocument(entry.document_id, entry.retention.owner_id)));
 });
