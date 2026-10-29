@@ -1,6 +1,6 @@
 # Wayfinder traceability matrix
 
-Recovery checkpoint: 2026-10-29, branch `feat/database-freshness`, implementation commit `52c3314`, base `7ca9cbf`.
+Recovery checkpoint: 2026-10-29, branch `feat/model-registry-lifecycle`, implementation commit `ed8c07a`, base `d0b529c`.
 
 This matrix links the verified public requirements to their local specifications, implementation seams, tests, and evidence. Git, tests, and runtime output are authoritative over memory.
 
@@ -14,7 +14,7 @@ This matrix links the verified public requirements to their local specifications
 | Pure citation mapping and fail-closed evidence validation | `.scratch/citation-resolver/spec.md`; `.scratch/citation-resolver/issues/01-citation-resolver-contract.md` | `src/citation-resolver.js`; `src/index.js`; `docs/retrieval-and-graph.md`; commit `3d61852`, closure `7ca9cbf` | `test/citation-resolver.test.js` | Focused 4/4; host 17 pass/7 expected skips; Debian/Alpine 17 pass/7 skips; integration 9/9 | Completed and verified |
 | Storage-backed freshness/revalidation after retrieval, including owner, retention, missing-segment, and hash-mutation checks | `.scratch/database-freshness/spec.md`; `.scratch/database-freshness/issues/01-citation-revalidation.md` | `src/postgres-store.js`; `docs/retrieval-and-graph.md`; commit `52c3314` | `test/integration/postgres-store.test.js` | Host 17/17 with 8 skips; live pgvector/pg17 integration 10/10; bounded parameterized query and pre-DB validation | Completed and verified |
 | Lexical search contract parity: positive limit bounded to 100 and opaque owner ID | `.scratch/database-freshness/spec.md`; `.scratch/database-freshness/issues/01-citation-revalidation.md` | `src/postgres-store.js` `searchSegmentsLexical`; commit `52c3314` | Invalid owner, zero, fractional, and 101-limit assertions | Host, Debian, and Alpine Node 22 suites; 17/17 pass per suite | Completed and verified |
-| Model registry and re-embedding lifecycle | `.scratch/rag-market-comparison/spec.md`; hybrid/citation deferred sections | Not implemented; would require new DDL and job lifecycle | None | Blocked on lifecycle/product decision and migration contract | Deferred |
+| Global embedding-model registry and owner-scoped partial coverage inspection | `.scratch/model-registry-lifecycle/spec.md`; `.scratch/model-registry-lifecycle/issues/01-model-registry-coverage.md` | `docker/postgres/init/004-embedding-models.sql`; `src/postgres-store.js`; `docs/retrieval-and-graph.md`; commit `ed8c07a` | `test/integration/postgres-store.test.js` | Host 17/17 with 9 skips; live pgvector/pg17 integration 11/11; Debian/Alpine Node 22 unit/package checks; syntax/Compose/privacy/diff | Completed and verified |
 | Relational graph retrieval and entity/relationship provenance | `docs/retrieval-and-graph.md` graph section; market comparison follow-ups | Not implemented | None | Blocked on graph schema and extraction contract | Deferred |
 | Parser benchmark against heavy external runtimes | `.scratch/rag-market-comparison/spec.md` follow-up | Not implemented | None | Blocked on parser runtime/container and corpus benchmark scope | Deferred |
 | ANN indexes and external vector sidecars | `docs/retrieval-and-graph.md`; market comparison follow-ups | Not implemented | None | Blocked until measured scale/workload evidence | Deferred |
@@ -22,4 +22,4 @@ This matrix links the verified public requirements to their local specifications
 
 ## Current decision
 
-Database freshness/citation revalidation is complete on `52c3314`. The next frontier is an explicit product and schema decision for model registry/re-embedding lifecycle, followed by graph retrieval only after entity/relationship provenance is specified. ANN indexes, parser benchmarking, gateway/authentication, and live answer generation remain deferred.
+Database freshness/citation revalidation is complete on `52c3314`; global model registry and partial coverage inspection are complete on `ed8c07a`. The next frontier is the execution lifecycle: provider/worker boundary, stale-worker generations, active-model routing, rollback/decommission TTL, and pruning policy. Graph retrieval follows only after entity/relationship provenance is specified. ANN indexes, parser benchmarking, gateway/authentication, and live answer generation remain deferred.
