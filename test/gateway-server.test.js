@@ -66,6 +66,19 @@ async function call(gateway, path, { method = 'GET', headers = auth, body, rawBo
   });
 }
 
+async function callText(gateway, path, { method = 'GET', headers = auth, body } = {}) {
+  const { port } = await gateway.start({ port: 0 });
+  return await new Promise((resolve, reject) => {
+    const request = httpRequest({ host: '127.0.0.1', port, path, method, headers: { ...headers, 'content-type': 'application/json' } }, (response) => {
+      const chunks = [];
+      response.on('data', (chunk) => chunks.push(chunk));
+      response.on('end', () => resolve({ status: response.statusCode, headers: response.headers, body: Buffer.concat(chunks).toString('utf8') }));
+    });
+    request.on('error', reject);
+    request.end(JSON.stringify(body));
+  });
+}
+
 async function expectStatus(gateway, path, options, status) {
   const response = await call(gateway, path, options);
   await gateway.stop();
@@ -637,10 +650,10 @@ test('does not call the model for empty chat-completions evidence and rejects un
   }, 400);
   assert.equal(badRole.body.error.code, 'invalid_request');
 
-  const unreviewedStream = withServer(answerableStorage(), { chat: async () => 'x [1].' });
-  const streamRefused = await expectStatus(unreviewedStream, '/v1/chat/completions', {
+  const invalidStream = withServer(answerableStorage(), { chat: async () => 'x [1].' });
+  const streamRefused = await expectStatus(invalidStream, '/v1/chat/completions', {
     method: 'POST',
-    body: { model: 'client-model', messages: [{ role: 'user', content: 'where?' }], stream: true }
+    body: { model: 'client-model', messages: [{ role: 'user', content: 'where?' }], stream: 'yes' }
   }, 400);
   assert.equal(streamRefused.body.error.code, 'invalid_request');
 
@@ -672,4 +685,151 @@ test('does not call the model for empty chat-completions evidence and rejects un
     body: { model: 'client-model', messages: [{ role: 'user', content: 'where?' }], owner_id: 'owner-two' }
   }, 400);
   assert.equal(rejectedOwner.body.error.code, 'invalid_request');
+});
+
+test('streams grounded chat completions and attaches answer metadata after citation revalidation', async () => {
+  const order = [];
+  const storage = answerableStorage();
+  const originalRevalidate = storage.revalidateCitations;
+  storage.revalidateCitations = async (...args) => {
+    order.push('revalidated');
+    return await originalRevalidate(...args);
+  };
+  const chat = async () => {
+    throw new Error('buffered chat path must not run');
+  };
+  chat.stream = async function* () {
+    order.push('stream-started');
+    yield 'The invoice alpha ';
+    yield 'is filed under the contract [1].';
+    order.push('stream-ended');
+  };
+  const gateway = withServer(storage, { chat });
+  const response = await callText(gateway, '/v1/chat/completions', {
+    method: 'POST',
+    body: {
+      model: 'client-model-is-ignored',
+      messages: [{ role: 'user', content: 'where is the invoice alpha?' }],
+      stream: true
+    }
+  });
+  await gateway.stop();
+  assert.equal(response.status, 200);
+  assert.match(response.headers['content-type'], /^text\/event-stream/u);
+  const events = response.body.split('\n\n').filter(Boolean).map((event) => {
+    const data = event.replace(/^data: /u, '');
+    return data === '[DONE]' ? data : JSON.parse(data);
+  });
+  assert.equal(events.at(-1), '[DONE]');
+  const chunks = events.slice(0, -1);
+  assert.equal(chunks[0].choices[0].delta.role, 'assistant');
+  assert.deepEqual(chunks.map(({ choices }) => choices[0].delta.content).filter(Boolean), [
+    'The invoice alpha ',
+    'is filed under the contract [1].'
+  ]);
+  const final = chunks.at(-1);
+  assert.equal(final.model, 'synthetic-chat');
+  assert.equal(final.choices[0].finish_reason, 'stop');
+  assert.equal(final.answer_metadata.citations.length, 1);
+  assert.equal(final.answer_metadata.uncertainty.level, 'low');
+  assert.ok(order.indexOf('revalidated') > order.indexOf('stream-ended'));
+});
+
+test('aborts upstream streaming when the client disconnects', { timeout: 2000 }, async () => {
+  let signal;
+  let observeAbort;
+  const aborted = new Promise((resolve) => { observeAbort = resolve; });
+  const chat = async () => '';
+  chat.stream = async function* (input) {
+    signal = input.signal;
+    yield 'partial answer';
+    await new Promise((resolve) => signal.addEventListener('abort', resolve, { once: true }));
+    observeAbort();
+  };
+  const gateway = withServer(answerableStorage(), { chat });
+  const { port } = await gateway.start({ port: 0 });
+  const request = httpRequest({
+    host: '127.0.0.1',
+    port,
+    path: '/v1/chat/completions',
+    method: 'POST',
+    headers: { ...auth, 'content-type': 'application/json' }
+  });
+  request.on('response', (response) => response.once('data', () => request.destroy()));
+  request.end(JSON.stringify({
+    model: 'client-model',
+    messages: [{ role: 'user', content: 'where?' }],
+    stream: true
+  }));
+  await aborted;
+  assert.equal(signal.aborted, true);
+  await gateway.stop();
+});
+
+test('streams empty-evidence answers without a model call and sanitizes post-header failures', async () => {
+  let modelCalls = 0;
+  const emptyStorage = answerableStorage();
+  emptyStorage.searchSegmentsLexical = async () => [];
+  const emptyChat = async () => {
+    modelCalls += 1;
+    return 'must not be called';
+  };
+  emptyChat.stream = async function* () {
+    modelCalls += 1;
+    yield 'must not be called';
+  };
+  const emptyGateway = withServer(emptyStorage, { chat: emptyChat });
+  const emptyResponse = await callText(emptyGateway, '/v1/chat/completions', {
+    method: 'POST',
+    body: { model: 'client-model', messages: [{ role: 'user', content: 'where?' }], stream: true }
+  });
+  await emptyGateway.stop();
+  assert.equal(emptyResponse.status, 200);
+  assert.equal(emptyResponse.body.includes('no evidence'), true);
+  assert.equal(emptyResponse.body.includes('unsupported'), true);
+  assert.equal(modelCalls, 0);
+
+  const earlyFailureChat = async () => '';
+  earlyFailureChat.stream = async function* () {
+    throw new Error('chat response stream failed: provider secret must not leak');
+  };
+  const earlyFailureGateway = withServer(answerableStorage(), { chat: earlyFailureChat });
+  const earlyFailure = await call(earlyFailureGateway, '/v1/chat/completions', {
+    method: 'POST',
+    body: { model: 'client-model', messages: [{ role: 'user', content: 'where?' }], stream: true }
+  });
+  await earlyFailureGateway.stop();
+  assert.equal(earlyFailure.status, 502);
+  assert.deepEqual(earlyFailure.body, { error: { code: 'model_failed', message: 'The model request failed' } });
+
+  const failingChat = async () => '';
+  failingChat.stream = async function* () {
+    yield 'partial answer';
+    throw new Error('chat response stream failed: provider secret must not leak');
+  };
+  const failingGateway = withServer(answerableStorage(), { chat: failingChat });
+  const failed = await callText(failingGateway, '/v1/chat/completions', {
+    method: 'POST',
+    body: { model: 'client-model', messages: [{ role: 'user', content: 'where?' }], stream: true }
+  });
+  await failingGateway.stop();
+  assert.equal(failed.status, 200);
+  assert.equal(failed.body.includes('provider secret'), false);
+  assert.equal(failed.body.includes('[DONE]'), false);
+  assert.equal(failed.body.includes('model_failed'), true);
+
+  const brokenStorage = answerableStorage();
+  brokenStorage.revalidateCitations = async () => { throw new TypeError('database path must not leak'); };
+  const citationChat = async () => '';
+  citationChat.stream = async function* () { yield 'Answer with citation [1].'; };
+  const brokenGateway = withServer(brokenStorage, { chat: citationChat });
+  const broken = await callText(brokenGateway, '/v1/chat/completions', {
+    method: 'POST',
+    body: { model: 'client-model', messages: [{ role: 'user', content: 'where?' }], stream: true }
+  });
+  await brokenGateway.stop();
+  assert.equal(broken.body.includes('database path'), false);
+  assert.equal(broken.body.includes('internal_error'), true);
+  assert.equal(broken.body.includes('answer_metadata'), false);
+  assert.equal(broken.body.includes('[DONE]'), false);
 });

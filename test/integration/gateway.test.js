@@ -25,6 +25,19 @@ async function call(base, path, { method = 'GET', headers = {}, body } = {}) {
   return { status: response.status, body: await response.json() };
 }
 
+async function callText(base, path, { method = 'GET', headers = {}, body } = {}) {
+  const response = await fetch(`${base}${path}`, {
+    method,
+    headers: {
+      authorization: `Bearer ${token}`,
+      ...(body === undefined ? {} : { 'content-type': 'application/json' }),
+      ...headers
+    },
+    body: body === undefined ? undefined : JSON.stringify(body)
+  });
+  return { status: response.status, headers: response.headers, body: await response.text() };
+}
+
 if (pool) {
   test.after(async () => pool.end());
 }
@@ -156,13 +169,19 @@ test('answers a question from real evidence with a fake chat adapter', { skip: !
   await storage.saveDocumentAndSegments(document, segmentDocument(document, { max_segment_chars: 200 }));
 
   const prompts = [];
+  const chat = async (input) => {
+    prompts.push(input);
+    return 'The invoice alpha is filed under contract beta [1].';
+  };
+  chat.stream = async function* (input) {
+    prompts.push(input);
+    yield 'The invoice alpha is filed under ';
+    yield 'contract beta [1].';
+  };
   const gateway = createGatewayServer({
     storage,
     authenticator: createAuthenticator({ token, owner_id, shell_users: {} }),
-    chat: async (input) => {
-      prompts.push(input);
-      return 'The invoice alpha is filed under contract beta [1].';
-    },
+    chat,
     answer_model: 'synthetic-chat'
   });
   const { url } = await gateway.start({ port: 0 });
@@ -203,13 +222,33 @@ test('answers a question from real evidence with a fake chat adapter', { skip: !
     assert.equal(completion.body.answer_metadata.uncertainty.level, 'low');
     assert.equal(prompts[1].model_id, 'synthetic-chat');
 
+    const streamed = await callText(url, '/v1/chat/completions', {
+      method: 'POST',
+      body: {
+        model: 'client-model-is-ignored',
+        messages: [{ role: 'user', content: 'invoice alpha' }],
+        collection_ids: [collection_id],
+        stream: true
+      }
+    });
+    assert.equal(streamed.status, 200);
+    assert.match(streamed.headers.get('content-type'), /^text\/event-stream/u);
+    const events = streamed.body.split('\n\n').filter(Boolean).map((event) => {
+      const data = event.replace(/^data: /u, '');
+      return data === '[DONE]' ? data : JSON.parse(data);
+    });
+    assert.equal(events.at(-1), '[DONE]');
+    assert.equal(events.at(-2).answer_metadata.citations[0].document_id, document_id);
+    assert.equal(events.at(-2).answer_metadata.uncertainty.level, 'low');
+    assert.equal(prompts[2].model_id, 'synthetic-chat');
+
     const unanswered = await call(url, '/v1/answers', {
       method: 'POST',
       body: { question: 'zzz-no-such-term' }
     });
     assert.equal(unanswered.status, 200);
     assert.equal(unanswered.body.uncertainty.level, 'unsupported');
-    assert.equal(prompts.length, 2, 'no model call without evidence');
+    assert.equal(prompts.length, 3, 'no model call without evidence');
 
     const stale = await pool.query('UPDATE documents SET source_hash = $2 WHERE document_id = $1', [
       document_id,

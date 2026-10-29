@@ -121,6 +121,38 @@ test('resolves a cited answer to provenance and reports low uncertainty on lexic
   assert.deepEqual(revalidation.input.options, { owner_id });
 });
 
+test('forwards streamed answer deltas and revalidates citations before completing', async () => {
+  const storage = createStorage({ matches: [match(1)] });
+  const order = [];
+  const originalRevalidate = storage.revalidateCitations;
+  storage.revalidateCitations = async (...args) => {
+    order.push('revalidated');
+    return await originalRevalidate(...args);
+  };
+  const chat = async () => {
+    throw new Error('buffered chat path must not run');
+  };
+  chat.stream = async function* () {
+    order.push('stream-started');
+    yield 'The invoice ';
+    yield 'is on page two [1].';
+    order.push('stream-ended');
+  };
+  const deltas = [];
+  const result = await answerQuestion({
+    storage,
+    chat,
+    question: 'where is the invoice?',
+    owner_id,
+    model_id: 'synthetic-chat',
+    on_delta: (delta) => deltas.push(delta)
+  });
+  assert.deepEqual(deltas, ['The invoice ', 'is on page two [1].']);
+  assert.equal(result.answer, 'The invoice is on page two [1].');
+  assert.ok(order.indexOf('revalidated') > order.indexOf('stream-ended'));
+  assert.equal(result.uncertainty.level, 'low');
+});
+
 test('reports high uncertainty for an out-of-range or missing citation', async () => {
   const storage = createStorage({ matches: [match(1)] });
   const forged = await answerQuestion({

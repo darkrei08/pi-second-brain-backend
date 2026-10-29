@@ -33,6 +33,17 @@ function mapSeamFailure(error) {
   return null;
 }
 
+function sanitizeStreamFailure(error) {
+  const mapped = mapSeamFailure(error);
+  if (mapped?.code === 'model_timeout') {
+    return new GatewayError(504, mapped.code, 'The model request timed out');
+  }
+  if (mapped?.code === 'model_failed') {
+    return new GatewayError(502, mapped.code, 'The model request failed');
+  }
+  return error;
+}
+
 function requireJsonBody(request) {
   const contentType = request.headers['content-type'];
   if (typeof contentType !== 'string' || !JSON_CONTENT_TYPE.test(contentType)) {
@@ -100,8 +111,8 @@ function chatCompletionQuestion(body) {
   if (typeof body.model !== 'string' || body.model.trim() === '') {
     throw new GatewayError(400, 'invalid_request', 'model must be non-empty text');
   }
-  if (body.stream !== undefined && body.stream !== false) {
-    throw new GatewayError(400, 'invalid_request', 'streaming is not enabled');
+  if (body.stream !== undefined && typeof body.stream !== 'boolean') {
+    throw new GatewayError(400, 'invalid_request', 'stream must be a boolean');
   }
   if (body.limit !== undefined && (!Number.isInteger(body.limit) || body.limit < 1 || body.limit > 100)) {
     throw new GatewayError(400, 'invalid_request', 'limit must be an integer between 1 and 100');
@@ -141,6 +152,18 @@ function send(response, status, payload, extraHeaders = {}) {
     ...extraHeaders
   });
   response.end(serialized);
+}
+
+function writeChatChunk(response, chunk) {
+  if (!response.headersSent) {
+    response.writeHead(200, {
+      'content-type': 'text/event-stream; charset=utf-8',
+      'cache-control': 'no-cache',
+      connection: 'keep-alive',
+      'x-accel-buffering': 'no'
+    });
+  }
+  response.write(`data: ${JSON.stringify(chunk)}\n\n`);
 }
 
 export function createGatewayServer({ storage, authenticator, embed, chat, answer_model, max_body_bytes = MAX_BODY_BYTES } = {}) {
@@ -248,33 +271,83 @@ export function createGatewayServer({ storage, authenticator, embed, chat, answe
       };
     },
 
-    'POST /v1/chat/completions': async ({ body, owner_id }) => {
+    'POST /v1/chat/completions': async ({ body, owner_id, response }) => {
       if (chat === undefined || answer_model === undefined) {
         throw new GatewayError(503, 'answers_unavailable', 'No answer model is configured');
       }
-      const answer = await answerQuestion({
+      const question = chatCompletionQuestion(body);
+      const input = {
         storage,
         chat,
         embed,
-        question: chatCompletionQuestion(body),
+        question,
         owner_id,
         collection_ids: optionalCollectionIds(body),
         model_id: answer_model,
         embedding_model_id: embed === undefined ? undefined : body.embedding_model_id,
         limit: body.limit ?? 6,
         max_tokens: body.max_tokens ?? 600
-      });
-      return {
-        status: 200,
-        body: {
-          id: `chatcmpl-${randomUUID()}`,
-          object: 'chat.completion',
-          created: Math.floor(Date.now() / 1000),
-          model: answer_model,
-          choices: [{ index: 0, message: { role: 'assistant', content: answer.answer }, finish_reason: 'stop' }],
-          answer_metadata: answerMetadata(answer)
-        }
       };
+      if (body.stream !== true) {
+        const answer = await answerQuestion(input);
+        return {
+          status: 200,
+          body: {
+            id: `chatcmpl-${randomUUID()}`,
+            object: 'chat.completion',
+            created: Math.floor(Date.now() / 1000),
+            model: answer_model,
+            choices: [{ index: 0, message: { role: 'assistant', content: answer.answer }, finish_reason: 'stop' }],
+            answer_metadata: answerMetadata(answer)
+          }
+        };
+      }
+      if (typeof chat.stream !== 'function') {
+        throw new GatewayError(503, 'answers_unavailable', 'The configured chat provider does not support streaming');
+      }
+      const abortController = new AbortController();
+      const abortOnClose = () => abortController.abort();
+      const id = `chatcmpl-${randomUUID()}`;
+      const created = Math.floor(Date.now() / 1000);
+      let started = false;
+      response.once('close', abortOnClose);
+      const emit = (delta) => {
+        if (response.destroyed || response.writableEnded) {
+          abortController.abort();
+          return;
+        }
+        if (!started) {
+          started = true;
+          writeChatChunk(response, {
+            id, object: 'chat.completion.chunk', created, model: answer_model,
+            choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }]
+          });
+        }
+        writeChatChunk(response, {
+          id, object: 'chat.completion.chunk', created, model: answer_model,
+          choices: [{ index: 0, delta: { content: delta }, finish_reason: null }]
+        });
+      };
+      try {
+        let answer;
+        try {
+          answer = await answerQuestion({ ...input, on_delta: emit, signal: abortController.signal });
+        } catch (error) {
+          throw sanitizeStreamFailure(error);
+        }
+        if (response.destroyed || response.writableEnded) return { streamed: true };
+        if (!started) emit(answer.answer);
+        writeChatChunk(response, {
+          id, object: 'chat.completion.chunk', created, model: answer_model,
+          choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+          answer_metadata: answerMetadata(answer)
+        });
+        response.write('data: [DONE]\n\n');
+        response.end();
+        return { streamed: true };
+      } finally {
+        response.off('close', abortOnClose);
+      }
     },
 
     'GET /v1/models': async ({ query, owner_id }) => {
@@ -337,7 +410,7 @@ export function createGatewayServer({ storage, authenticator, embed, chat, answe
         const body = await readJsonBody(request, max_body_bytes);
         requireObject(body, 'body');
         rejectCallerOwner(body);
-        return await handler({ body, query: url.searchParams, owner_id: identity.owner_id });
+        return await handler({ body, query: url.searchParams, owner_id: identity.owner_id, response });
       }
       return await handler({ body: {}, query: url.searchParams, owner_id: identity.owner_id });
     }
@@ -346,13 +419,21 @@ export function createGatewayServer({ storage, authenticator, embed, chat, answe
 
   const server = createServer((request, response) => {
     handle(request, response)
-      .then((result) => send(response, result.status, result.body))
+      .then((result) => {
+        if (result.streamed) return;
+        send(response, result.status, result.body);
+      })
       .catch((error) => {
         const mapped = mapSeamFailure(error) ?? error;
         const { status, body } = errorPayload(mapped);
         const headers = mapped instanceof GatewayError && mapped.headers ? mapped.headers : {};
+        if (response.destroyed) return;
         if (response.headersSent) {
-          response.destroy();
+          const streamError = mapped instanceof GatewayError
+            ? body.error
+            : { code: 'internal_error', message: 'The request failed' };
+          response.write(`data: ${JSON.stringify({ error: streamError })}\n\n`);
+          response.end();
           return;
         }
         // An oversized body was refused without reading it, so the connection cannot be reused safely.

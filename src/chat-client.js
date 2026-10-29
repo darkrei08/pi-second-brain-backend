@@ -87,6 +87,73 @@ function readContent(body) {
   return message.content;
 }
 
+async function* readStreamContent(response, signal) {
+  if (response.body === null || typeof response.body?.getReader !== 'function') {
+    throw new Error('chat response stream is unavailable');
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let receivedDone = false;
+  let bodyEnded = false;
+  try {
+    while (!receivedDone) {
+      const { done, value } = await reader.read();
+      if (done) {
+        bodyEnded = true;
+        buffer += decoder.decode();
+        break;
+      }
+      buffer += decoder.decode(value, { stream: true });
+      while (true) {
+        const boundary = /\r?\n\r?\n/u.exec(buffer);
+        if (boundary === null) break;
+        const event = buffer.slice(0, boundary.index);
+        buffer = buffer.slice(boundary.index + boundary[0].length);
+        const data = event.split(/\r?\n/u)
+          .filter((line) => line.startsWith('data:'))
+          .map((line) => line.slice(5).replace(/^ /u, ''))
+          .join('\n');
+        if (data === '') continue;
+        if (data === '[DONE]') {
+          receivedDone = true;
+          break;
+        }
+        let payload;
+        try {
+          payload = JSON.parse(data);
+        } catch {
+          throw new Error('chat response stream contains invalid JSON');
+        }
+        if (payload?.error !== undefined) {
+          throw new Error('chat response stream failed');
+        }
+        if (!Array.isArray(payload?.choices)) {
+          throw new Error('chat response stream contains invalid choices');
+        }
+        const content = payload.choices[0]?.delta?.content;
+        if (content === undefined || content === null) continue;
+        if (typeof content !== 'string') {
+          throw new Error('chat response stream contains invalid content');
+        }
+        if (content !== '') yield content;
+      }
+    }
+    if (!receivedDone) {
+      throw new Error('chat response stream ended unexpectedly');
+    }
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith('chat response stream')) throw error;
+    if (signal?.aborted && signal.reason?.name === 'TimeoutError') {
+      throw new Error('chat request timed out');
+    }
+    throw new Error('chat response stream failed');
+  } finally {
+    if (!bodyEnded) await reader.cancel().catch(() => {});
+    reader.releaseLock();
+  }
+}
+
 export function createOpenAICompatibleChat({ fetch = globalThis.fetch, base_url, api_key, timeout_ms = DEFAULT_TIMEOUT_MS } = {}) {
   if (typeof fetch !== 'function') {
     throw new TypeError('fetch must be a function');
@@ -102,7 +169,7 @@ export function createOpenAICompatibleChat({ fetch = globalThis.fetch, base_url,
     throw new TypeError(`timeout_ms must be an integer between 1 and ${MAX_TIMEOUT_MS}`);
   }
 
-  return async function chat(input) {
+  const chat = async function chat(input) {
     const { model_id, messages, max_tokens } = validateCallInput(input);
     const headers = { 'content-type': 'application/json' };
     if (api_key !== undefined) {
@@ -140,4 +207,38 @@ export function createOpenAICompatibleChat({ fetch = globalThis.fetch, base_url,
     }
     return readContent(body);
   };
+  chat.stream = async function* stream(input) {
+    const { model_id, messages, max_tokens } = validateCallInput(input);
+    const headers = { 'content-type': 'application/json' };
+    if (api_key !== undefined) headers.authorization = `Bearer ${api_key}`;
+    const timeoutSignal = AbortSignal.timeout(timeout_ms);
+    const signal = input.signal === undefined ? timeoutSignal : AbortSignal.any([timeoutSignal, input.signal]);
+    let response;
+    try {
+      response = await fetch(endpoint, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ model: model_id, messages, max_tokens, temperature: 0, stream: true }),
+        redirect: 'error',
+        signal
+      });
+    } catch (error) {
+      if (signal.aborted && signal.reason?.name === 'TimeoutError') {
+        throw new Error('chat request timed out');
+      }
+      const code = error && typeof error.code === 'string' && /^[A-Z0-9_]{1,40}$/u.test(error.code)
+        ? ` (${error.code})`
+        : '';
+      throw new Error(`chat request failed${code}`);
+    }
+    if (!response.ok) {
+      throw new Error(`chat request failed with status ${response.status}`);
+    }
+    const contentType = response.headers?.get?.('content-type');
+    if (typeof contentType !== 'string' || !/^text\/event-stream(?:\s*;|$)/iu.test(contentType)) {
+      throw new Error('chat response stream must use text/event-stream');
+    }
+    yield* readStreamContent(response, signal);
+  };
+  return chat;
 }

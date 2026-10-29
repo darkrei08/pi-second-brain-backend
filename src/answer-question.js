@@ -127,7 +127,9 @@ export async function answerQuestion({
   embedding_model_id,
   model_id,
   limit = DEFAULT_LIMIT,
-  max_tokens = 600
+  max_tokens = 600,
+  on_delta,
+  signal
 } = {}) {
   requireText(question, 'question');
   requireText(model_id, 'model_id');
@@ -139,6 +141,12 @@ export async function answerQuestion({
   }
   if (typeof chat !== 'function') {
     throw new TypeError('chat must be a function');
+  }
+  if (on_delta !== undefined && typeof on_delta !== 'function') {
+    throw new TypeError('on_delta must be a function when provided');
+  }
+  if (on_delta !== undefined && typeof chat.stream !== 'function') {
+    throw new TypeError('chat.stream must be a function when on_delta is provided');
   }
   if (embed !== undefined && typeof embed !== 'function') {
     throw new TypeError('embed must be a function when provided');
@@ -165,7 +173,24 @@ export async function answerQuestion({
     };
   }
 
-  const rawAnswer = await chat({ model_id, messages: buildAnswerPrompt(question, matches), max_tokens });
+  const chatInput = { model_id, messages: buildAnswerPrompt(question, matches), max_tokens };
+  if (signal !== undefined) chatInput.signal = signal;
+  let rawAnswer;
+  if (on_delta === undefined) {
+    rawAnswer = await chat(chatInput);
+  } else {
+    rawAnswer = '';
+    for await (const delta of chat.stream(chatInput)) {
+      if (typeof delta !== 'string' || delta === '') {
+        throw new Error('chat response stream must yield non-empty text');
+      }
+      rawAnswer += delta;
+      on_delta(delta);
+    }
+    if (rawAnswer.trim() === '') {
+      throw new Error('chat response content must not be empty');
+    }
+  }
   if (typeof rawAnswer !== 'string') {
     throw new Error('chat must return the answer text');
   }
