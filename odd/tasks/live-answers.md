@@ -27,15 +27,17 @@ Operator directives for this session, quoted verbatim:
 
 | ID | Spec | Route | Commit |
 | --- | --- | --- | --- |
-| T1 | S13 | Parent: recovery, branch `feat/live-answers`, tracker, feature document | this commit |
-| T2 | S12 | Workflow `live-answers-design-panel` (architect gemini-3.8-flash-high, security gpt-6-luna, oracle gpt-5.6-luna, summarizer gemini-3.5-flash-lite; all cliproxyapi) | this commit |
-| T3 | S9, S11 | `src/chat-client.js` adapter plus tests | pending |
-| T4 | S1-S8, S11 | `src/answer-question.js` use case plus tests | pending |
-| T5 | S10 | Gateway route `POST /v1/answers` plus tests | pending |
-| T6 | all | End-to-end HTTP test with a fake chat client and a real database; docs; tracker close | pending |
+| T1 | S13 | Parent: recovery, branch `feat/live-answers`, tracker, feature document | `75682cb` |
+| T2 | S12 | Workflow `live-answers-design-panel` (architect gemini-3.8-flash-high, security gpt-6-luna, oracle gpt-5.6-luna, summarizer gemini-3.5-flash-lite; all cliproxyapi) | `75682cb` |
+| T3 | S9, S11 | `src/chat-client.js` adapter plus tests | `03331e1` |
+| T4 | S1-S8, S11 | `src/answer-question.js` use case plus tests | `03331e1` |
+| T5 | S10 | Gateway route `POST /v1/answers` plus tests | `03331e1` |
+| T6 | all | End-to-end HTTP test with a fake chat client and a real database, docs, tracker close | `03331e1` and closure commit |
 
 ## Log
 
 - L1 (operator request, 2026-10-29): the recovery and autonomous-development directive, with cliproxyapi-only models and the failover matrix for Opus/Sonnet.
 - L2 (failover facts, verified from `~/.pi/agent/ha.json` and `cliproxyapi-models.json`): groups `reviewer`, `development`, `testing`, `summary`, `research` exist with ordered entries; `errorHandling.capacityErrorAction` and `quotaErrorAction` are `next_provider`; every listed cliproxyapi model was fresh at fetch time. Because `claude-sonnet-4-6` already failed once with an account quota error, this slice starts every role on a non-Anthropic cliproxyapi model and keeps Opus/Sonnet only as later failover entries.
 - L3 (design panel, 2026-10-29, workflow `faae0999-fbdd-4aa7-a03c-921255a9bb1a`): the panel proposed an audit-logging and quota work unit and an OpenAI-compatible chat route in this slice. Both were rejected in A6 and A7: streaming and tool-call semantics are undesigned, and quotas need a policy that does not exist. Accepted from the panel: numbered JSON evidence blocks, a fixed instruction block, unresolved and stale citation tracking, and the `none/low/high/unsupported` uncertainty ladder.
+- L4 (defect found by the integration test, 2026-10-29): a document whose stored segment provenance no longer matched its row made `resolveCitations` throw, and the gateway reported the caller's request as invalid. The use case now collects such evidence as unusable, records its id in `stale_citations`, and reports `high` uncertainty; a unit case pins it.
+- L5 (verification, 2026-10-29): unit 78 pass / 20 expected skips / 0 fail; live pgvector/pg17 integration 24/24 (HTTP answer round trip, no-evidence without a model call, tampered document downgraded to high); Alpine Node 22 matrix identical.

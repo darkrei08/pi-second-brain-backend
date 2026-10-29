@@ -1,6 +1,6 @@
 # Wayfinder traceability matrix
 
-Recovery checkpoint: 2026-10-29, branch `feat/http-gateway`, implementation commits `b9bedd7`, `ac35b32`, `230bf1a`, base `adc22cb`.
+Recovery checkpoint: 2026-10-29, branch `feat/live-answers`, implementation commit `03331e1`, base `d13bbae`.
 
 This matrix links the verified public requirements to their local specifications, implementation seams, tests, and evidence. Git, tests, and runtime output are authoritative over memory.
 
@@ -22,12 +22,17 @@ This matrix links the verified public requirements to their local specifications
 | Interaction surface and context grouping | `.scratch/interface-stack/map.md`; `.scratch/interface-stack/research.md`; `.scratch/interface-stack/issues/01-select-interaction-shell-and-collections.md` | Decision only, nothing installed or vendored; commit `2a5fee7` | None (documentation slice) | Source-verified integration facts: Open WebUI forwards `folder_id` and `files` through an `inlet` filter, LibreChat cannot forward a project id, licence positions read from upstream, five authentic UI captures | Completed and verified |
 | Collections as a retrieval scope behind the interaction shell | `.scratch/interface-stack/issues/02-collections-as-retrieval-scope.md` | `docker/postgres/init/005-collections.sql`; `src/postgres-store.js` (`createCollection`, `deleteCollection`, `listDocumentCollections`, ingest membership, four seam filters); `docs/retrieval-and-graph.md`; commits `6e296cc`, `ebec794` | `test/integration/postgres-store.test.js` (ingest zero/one/many, fail-closed foreign collection, scoped retrieval on all four seams, owner isolation, both cascades, hybrid field set) | Host 42 pass / 17 skips; live pgvector/pg17 integration 21/21 twice; Debian and Alpine Node 22 matrix identical; differential probe of unscoped output shows only the intended hybrid `id`; package, Compose, and privacy checks clean | Completed and verified |
 | HTTP gateway with boundary identity | `.scratch/http-gateway/map.md`; `.scratch/http-gateway/issues/01-http-gateway.md` | `src/gateway-config.js`, `src/gateway-auth.js`, `src/gateway-server.js`, `src/gateway-error.js`, `src/gateway-cli.js`, `src/opaque-id.js`; commits `b9bedd7`, `ac35b32`, `230bf1a` | `test/gateway-config.test.js`, `test/gateway-auth.test.js`, `test/gateway-server.test.js`, `test/integration/gateway.test.js` | Host 61 pass / 19 skips; live pgvector/pg17 integration 23/23 with an HTTP ingest, scoped retrieval, citation revalidation and a cross-owner conflict; Debian and Alpine Node 22 matrix identical; live smoke of `src/gateway-cli.js` (health, readiness, 401, models, ingest, retrieval, forged owner 400, oversize 413); review panel with five findings fixed |
+| Grounded answers with reported uncertainty | `.scratch/live-answers/map.md`; `.scratch/live-answers/issues/01-grounded-answers.md` | `src/answer-question.js`, `src/chat-client.js`, `src/gateway-server.js` (`POST /v1/answers`), `src/gateway-cli.js`; commit `03331e1` | `test/answer-question.test.js`, `test/chat-client.test.js`, `test/gateway-server.test.js`, `test/integration/gateway.test.js` | Host 78 pass / 20 skips; live pgvector/pg17 integration 24/24 with an HTTP answer round trip, a no-evidence question that made no model call, and a tampered document that reported one stale citation; Alpine Node 22 matrix identical | Completed and verified |
 | Relational graph retrieval and entity/relationship provenance | `docs/retrieval-and-graph.md` graph section; market comparison follow-ups | Not implemented | None | Blocked on graph schema and extraction contract | Deferred |
 | Parser benchmark against heavy external runtimes | `.scratch/rag-market-comparison/spec.md` follow-up | Not implemented | None | Blocked on parser runtime/container and corpus benchmark scope | Deferred |
 | ANN indexes and external vector sidecars | `docs/retrieval-and-graph.md`; market comparison follow-ups | Not implemented | None | Blocked until measured scale/workload evidence | Deferred |
 | HTTP gateway/authentication and live answer generation | `docs/private-runtime.md`; `docs/development.md` | Not implemented | None | Deferred until storage/retrieval/freshness contracts are sealed | Deferred |
 
 ## Current decision
+
+Grounded answers are complete on `03331e1`: the answer cites numbered evidence, a citation outside the evidence, a stale hash, or self-inconsistent provenance downgrades it, and a question without evidence is answered without a model call. Remaining gateway work is the OpenAI-compatible `/v1/chat/completions` entry with streaming, the Open WebUI filter and pipe, TLS, metrics, packaging, and the audit/quota policy. Graph retrieval still waits for entity and relationship provenance.
+
+## Previous decision
 
 The HTTP gateway is complete on `230bf1a`: six routes, one bearer token, server-derived `owner_id`, a 1 MiB body cap, and a failure contract that never carries a driver message. Answer generation, the Open WebUI filter and pipe, TLS termination, metrics, and deployment packaging are the remaining gateway work; graph retrieval still waits for entity and relationship provenance.
 
