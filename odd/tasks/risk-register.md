@@ -23,9 +23,9 @@ Record evidenced dispositions, exposure ranking, verification commands, review, 
 
 ## Tasks
 
-- T1 — S2, S5 — Verify each candidate against source/tests and capture exact evidence — route: read-only source audit — status: done — commit: pending.
-- T2 — S1-S5 — Write the risk map, claimed audit issue, and this task record — route: documentation — status: done — commit: pending.
-- T3 — S1-S5 — Validate artifacts, commit on `feat/session-2`, run native review, save checkpoint — route: local verification and native review — status: in progress — commit: pending; push: prohibited.
+- T1 — S2, S5 — Verify each candidate against source/tests and capture exact evidence — route: read-only source audit — status: done — commit: `26bb2760f962c9ede28893ed5d1263e2207b01d6`.
+- T2 — S1-S5 — Write the risk map, claimed audit issue, and this task record — route: documentation — status: done — commit: `26bb2760f962c9ede28893ed5d1263e2207b01d6`.
+- T3 — S1-S5 — Validate artifacts, commit on `feat/session-2`, run native review, save checkpoint — route: local verification and native review — status: done — commit: `26bb2760f962c9ede28893ed5d1263e2207b01d6`; push: prohibited.
 
 ## Log
 
@@ -53,3 +53,5 @@ Finish with: a ranked list by exposure, the three mitigations worth doing before
 - L2. Read-only source verification completed on `feat/session-2` at HEAD `1c9a2ff`. Retained risks are stated with corrections in the register: R1 mapping is caller-selectable only after the shared bearer token; R2 sends question/evidence outbound but the answer is returned to the host; R3 has prompt-injection controls and an inline hostile-text test but no provider-behavior or entailment proof; R4 validates citation integrity, not semantic support; R5 hard deletion cascades, while tombstone/purged states retain rows and there is no export API; R6 lacks explicit rate/concurrency caps, but the 120-second setting is not evidenced as a model-call timeout; R7's local CI gap is confirmed but the “Pi extension dependencies report 3 high” claim is unsupported here; R8 has no migration runner, but volume recreation is not required or recommended by source; R9's matrix is presently stale; R10 lacks real-provider and load coverage, but an inline hostile evidence fixture exists. CodeGraph was initialized locally because the inherited index belonged to `/root/git/personale`. The parallel source review timed out before producing usable findings; it was not retried, and evidence was checked inline.
 
 - L3. Drafted the destination map and claimed audit issue. The issue contains per-risk evidence, controls, residual risk, scores, verification commands, follow-up lines, ranking, pre-deployment actions, and rejected subclaims. The next task is structural validation, local commit, native review, and checkpoint.
+
+- L4. Structural readback found all required map sections, all R1-R10 records, and the audit/status labels; staged diff check passed. Primary work-unit commit `26bb2760f962c9ede28893ed5d1263e2207b01d6` is on `feat/session-2`. Native review `review-68c6a2cb9f916ec4` assessed the committed range as low/passive, approved it without reviewer captures, and was acknowledged. No tests or provider calls were run because this is documentation-only. The Engram checkpoint is saved. The risk register work unit is complete; no push.
