@@ -1,45 +1,41 @@
-# Handoff for a fresh session
+# Recovery checkpoint
 
-Written 2026-10-29 by the session that built the gateway and grounded answers. Read this file, then `odd/traceability.md`. Git, tests, and the tracker are authoritative; this file only points at them.
+Restated 2026-10-31 at `feat/session-2`. Git, the tracker, and the tests are authoritative; this file is a pointer, not evidence.
 
-## Repository and branch stack
+## Where the work stands
 
-Repository: `/root/git/personale/pi.dev/second-brain-stack` (public reference docs plus a Node 22 ESM package, only dependency `pg`).
+Repository: `/root/git/personale/pi.dev/second-brain-stack`. Active worktree: `.worktrees/session-2` on `feat/session-2`. Nothing is pushed and there is no pull request; 20 local commits sit above `origin/feat/embedding-backfill`.
 
-Branches are stacked, one Wayfinder each, and **nothing is pushed** beyond `origin/feat/embedding-backfill`:
+Sealed and verified before this checkpoint: segmentation with provenance, parser normalization, PostgreSQL persistence with owner scoping, lexical/semantic/hybrid retrieval with collection scope, citation resolution and revalidation, model registry and coverage, embedding backfill, the OpenAI-compatible embedder, retrieval-mode description, the loopback HTTP gateway with per-principal identity, grounded answers with reported uncertainty, buffered and streaming chat completions, bounded research, and the Open WebUI filter and pipe.
 
-```text
-main
-└─ feat/embedding-backfill            (pushed; interface-stack decision)
-   └─ feat/collections-retrieval-scope (local)
-      └─ feat/http-gateway             (local)
-         └─ feat/live-answers          (local, current)
-```
+Mitigations delivered from the delivered-stack risk register:
 
-Seventeen local commits are unpushed. Do not push, open a PR, or merge without explicit authorization.
+| Risk | State | Evidence |
+|---|---|---|
+| R1 shared bearer token | done | `f5602b5`; native review `review-c88c8279c7a63750` acknowledged; runtime-proven with two principals |
+| R2 provider egress | done | `a98fcd5a64a67c5f69956e5e25590a0038da7051`; declared-host allowlist, refusals proven at runtime |
+| R8 migrations and restore | done | `76fdadb4dd1aa3a2c9310d28800bc4dbca1ebbb7`; `pnpm migrate`, rehearsal recorded in the ticket |
+| R5 export and purge | **open, needs the operator** | tombstone versus physical purge is an irreversible product decision |
 
-## What is sealed and verified
-
-Segmentation with provenance, parser normalization, PostgreSQL persistence with owner scoping, lexical/semantic/hybrid retrieval with an optional collection scope, citation resolution and revalidation, model registry and coverage, embedding backfill, an OpenAI-compatible embedder, retrieval-mode description, the loopback HTTP gateway with boundary identity (six routes), and grounded answers with reported uncertainty.
-
-Trackers, newest first: `.scratch/live-answers/`, `.scratch/http-gateway/`, `.scratch/interface-stack/`, plus the earlier `.scratch/*` efforts. Every one has a `map.md` with decisions and `issues/` with resolved tickets.
+The register lives in `.scratch/risk-register/` with its map, ranking and per-risk evidence. `odd/traceability.md` carries one row per delivered requirement and its owning commit.
 
 ## Next actionable work, in order
 
-1. `POST /v1/chat/completions` with streaming, mapping the OpenAI request shape onto `answerQuestion`. Criterion before starting: decide how streaming interacts with the citation and uncertainty report, because an answer streamed token by token cannot report its citations at the end unless the client tolerates a trailing event. Decision A6 of `.scratch/live-answers/map.md` left it deferred for exactly this reason.
-2. The Open WebUI glue from decision V6 of `.scratch/interface-stack/map.md`: one `inlet` filter that forwards `folder_id` as `collection_ids` and one Pipe that exposes research mode. Nothing is installed or configured yet, so this needs an installed shell to be verified honestly.
-3. TLS termination, metrics, deployment packaging, and the audit-log/quota policy deferred in A7.
-4. Still deferred with reasons: graph retrieval (needs entity and relationship provenance), ANN indexes (needs measured workload), parser benchmark, `/v1/search`, `/v1/memory/*`.
+1. R5: decide tombstone versus purge semantics, then implement owner-scoped export plus the tested physical purge it implies. This is the only mitigation still blocking real-corpus use.
+2. R2's second half: emit an audit record of provider and model metadata per model call without logging evidence text.
+3. R6 rate and concurrency bound around model-backed routes; R7 a repository CI gate; R10 an opt-in provider smoke test and a bounded load test.
+4. Deferred with reasons: graph retrieval (needs entity and relationship provenance), ANN indexes (needs measured workload), parser benchmark, `/v1/search`, `/v1/memory/*`, TLS, metrics, deployment packaging.
 
 ## Commands
 
 ```bash
-pnpm install --frozen-lockfile   # only dependency is pg
-pnpm test                        # unit suite; integration cases self-skip
-NODE_OPTIONS=--max-old-space-size=1024 node src/gateway-cli.js   # needs env below
+pnpm install --frozen-lockfile
+pnpm test                       # unit suite; integration cases self-skip
+pnpm migrate                    # needs DATABASE_URL
+NODE_OPTIONS=--max-old-space-size=1024 node src/gateway-cli.js
 ```
 
-Integration needs a disposable pgvector instance; do not reuse the developer volume:
+Integration and rehearsal use a disposable instance, never the developer volume:
 
 ```bash
 docker run -d --rm --name sbs-test-pg -e POSTGRES_HOST_AUTH_METHOD=trust \
@@ -49,19 +45,20 @@ TEST_DATABASE_URL='postgres://test@127.0.0.1:55433/test' pnpm run test:integrati
 docker rm -f sbs-test-pg
 ```
 
-Gateway environment: `DATABASE_URL`, and either `GATEWAY_PRINCIPALS` (JSON array of `{token, owner_id}`; the bearer token alone selects the owner) or the legacy `GATEWAY_TOKEN` (32+ chars) with `GATEWAY_OWNER_ID` and optional `GATEWAY_SHELL_USERS`. Optional: `GATEWAY_HOST`, `GATEWAY_PORT`, `EMBEDDING_BASE_URL`, `EMBEDDING_API_KEY`, `ANSWER_BASE_URL`, `ANSWER_API_KEY`, `ANSWER_MODEL`.
+Gateway environment: `DATABASE_URL` plus either `GATEWAY_PRINCIPALS` (JSON array of `{token, owner_id}`) or the legacy `GATEWAY_TOKEN` with `GATEWAY_OWNER_ID`. Optional: `GATEWAY_HOST`, `GATEWAY_PORT`, `EMBEDDING_BASE_URL`, `EMBEDDING_API_KEY`, `EMBEDDING_ALLOWED_HOSTS`, `ANSWER_BASE_URL`, `ANSWER_API_KEY`, `ANSWER_ALLOWED_HOSTS`, `ANSWER_MODEL`. A remote provider host must be declared or startup is refused.
 
-## Working rules that this repository enforced
+## Working rules this repository enforces
 
-- ODD: feature document in `odd/tasks/<feature>.md` with verbatim `S#` specs and a `## Log`, a tracker ticket under `.scratch/<effort>/issues/`, test-first with observed RED, work-unit commits, tracker closed with an `## Answer` and a traceability row.
-- Native review under RDD is on. `gentle_review` assess, inspect, start with lenses, capture the reviewer group once (forecast first, then `reviewerRunAcknowledged: true`), then `acknowledge-approved`. Do not run raw STATUS.
-- Model selection: cliproxyapi aliases only, per role, with the failover matrix in `~/.pi/agent/ha.json` and the role map in `~/.pi/agent/pi-ha-role-groups.json`. Opus and Sonnet are listed first for reviewer roles but have failed with account quota errors; start on `gpt-6-luna`, `gpt-5.6-luna`, or `gemini-3.8-flash-high` and keep the Anthropic entries as later failover.
-- Tooling quirks worth knowing before wasting a run: the bash tool refuses pipes into `head`/`tail`, backgrounded commands, and `sleep` sequences, so prove a server end to end inside one node script; `parallel(...)` returns a keyed object, not an array; concurrent `agent()` calls must come from distinct call sites; an Engram `mem_save` with a stable `topic_key` upserts.
+- ODD: feature document in `odd/tasks/`, verbatim `S#` specs, a `## Log`, a tracker ticket under `.scratch/<effort>/issues/`, test-first with observed RED, one work-unit commit per slice.
+- Native review is on. `assess` then `inspect` then `start` with the pertinent lenses, capture the group once (forecast, then `reviewerRunAcknowledged: true`), then `acknowledge-approved`. Use the facade, never raw STATUS.
+- `worktree:` in a `parallel` dispatch did not create an isolated worktree on 2026-10-31; verify with `git worktree list` before claiming isolation, and reserve disjoint surfaces.
+- Tool quirks: the bash tool refuses pipes into `head`/`tail`, backgrounded commands and `sleep` loops, so use the `log=$(mktemp)` pattern and prove servers inside one node script. `parallel(...)` returns a keyed object.
+- Model aliases only from `cliproxyapi`, per role, with the failover matrix in `~/.pi/agent/ha.json`.
 
 ## Memory
 
-Engram project `second-brain-stack`. The useful topic keys are `second-brain-stack/wayfinder/collections-scope`, `second-brain-stack/wayfinder/http-gateway`, `second-brain-stack/wayfinder/live-answers`, `second-brain-stack/recovery-checkpoint`, and `second-brain-stack/odd/<feature>/tasks`. Start from `mem_context` and `mem_search`, not from a conversation summary.
+Engram project `second-brain-stack`. Useful topic keys: `second-brain-stack/recovery-checkpoint`, `second-brain-stack/wayfinder/*`, `second-brain-stack/odd/<feature>/tasks`. Start from `mem_context`, not from a conversation summary.
 
-## Known gaps to state honestly
+## Known gaps stated honestly
 
-No shell is installed, so folder-to-collection mapping, the filter, and the Pipe are unproven at runtime. The chat adapter was proven with fake providers, never against a real endpoint. Nothing is pushed, so the whole stack lives in local branches only.
+The Open WebUI plugins are written and unit-tested but never loaded in a shell. No model call has reached a real provider; every one used a fake. No load test exists. R5 is unimplemented by decision. Nothing is pushed, so the whole stack lives in local branches only, and the branch is far past a single reviewable delivery slice.
