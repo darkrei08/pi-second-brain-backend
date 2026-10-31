@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { createOpenAICompatibleEmbedder, runEmbeddingBackfill } from '../src/index.js';
+import { createOpenAICompatibleEmbedder as createProviderClient, runEmbeddingBackfill } from '../src/index.js';
+
+function createOpenAICompatibleEmbedder(options) {
+  return createProviderClient({ allowed_hosts: ['api.example.test'], ...options });
+}
 
 const apiKey = 'sk-test-secret-value';
 const modelId = 'text-embedding-synthetic-3d';
@@ -52,6 +56,30 @@ test('rejects unsafe or malformed configuration at construction', () => {
     () => createOpenAICompatibleEmbedder({ fetch: createFetch(), base_url: 'http://embeddings.example.test/v1', api_key: apiKey }),
     /must use https unless the host is loopback/
   );
+});
+
+test('allows only declared remote provider hosts and exempts loopback', async () => {
+  const inputs = ['alpha one.'];
+  const approvedFetch = createFetch({ body: embedderBody(inputs) });
+  const approved = createOpenAICompatibleEmbedder({
+    fetch: approvedFetch,
+    base_url: 'https://Models.Example.com./v1',
+    allowed_hosts: ['models.example.com']
+  });
+  await approved({ model_id: modelId, dimensions: 3, inputs });
+  assert.equal(approvedFetch.calls.length, 1);
+
+  const refusedFetch = createFetch({ body: embedderBody(inputs) });
+  assert.throws(
+    () => createOpenAICompatibleEmbedder({ fetch: refusedFetch, base_url: 'https://unlisted.example.com/v1' }),
+    (error) => error instanceof TypeError && error.message.includes('unlisted.example.com') && error.message.includes('EMBEDDING_ALLOWED_HOSTS')
+  );
+  assert.deepEqual(refusedFetch.calls, []);
+
+  const loopbackFetch = createFetch({ body: embedderBody(inputs) });
+  const loopback = createOpenAICompatibleEmbedder({ fetch: loopbackFetch, base_url: 'http://localhost/v1' });
+  await loopback({ model_id: modelId, dimensions: 3, inputs });
+  assert.equal(loopbackFetch.calls.length, 1);
 });
 
 test('sends the documented request to a loopback endpoint without a key', async () => {

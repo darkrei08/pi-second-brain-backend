@@ -25,7 +25,7 @@ function isLoopbackHostname(hostname) {
     LOOPBACK_MAPPED_IPV4_PATTERN.test(normalized);
 }
 
-function resolveEndpoint(base_url) {
+function resolveEndpoint(base_url, allowed_hosts = []) {
   requireNonEmptyText(base_url, 'base_url');
   let url;
   try {
@@ -42,6 +42,10 @@ function resolveEndpoint(base_url) {
   // Corpus text must never travel in cleartext off this host.
   if (url.protocol === 'http:' && !isLoopbackHostname(url.hostname)) {
     throw new TypeError('base_url must use https unless the host is loopback');
+  }
+  const hostname = url.hostname.toLowerCase().replace(/\.$/, '');
+  if (!isLoopbackHostname(hostname) && !allowed_hosts.some((host) => host.toLowerCase().replace(/\.$/, '') === hostname)) {
+    throw new TypeError(`provider host ${hostname} is not allowed; set EMBEDDING_ALLOWED_HOSTS`);
   }
   return `${url.origin}${url.pathname.replace(/\/+$/, '')}/embeddings`;
 }
@@ -93,11 +97,11 @@ function validateVectors(data, { dimensions, inputs }) {
   });
 }
 
-export function createOpenAICompatibleEmbedder({ fetch = globalThis.fetch, base_url, api_key, timeout_ms = DEFAULT_TIMEOUT_MS } = {}) {
+export function createOpenAICompatibleEmbedder({ fetch = globalThis.fetch, base_url, api_key, allowed_hosts = [], timeout_ms = DEFAULT_TIMEOUT_MS } = {}) {
   if (typeof fetch !== 'function') {
     throw new TypeError('fetch must be a function');
   }
-  const endpoint = resolveEndpoint(base_url);
+  const endpoint = resolveEndpoint(base_url, allowed_hosts);
   if (api_key !== undefined) {
     requireNonEmptyText(api_key, 'api_key');
     if (!PRINTABLE_ASCII_PATTERN.test(api_key)) {

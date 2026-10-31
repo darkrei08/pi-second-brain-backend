@@ -1,7 +1,30 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { loadGatewayConfig, DEFAULT_HOST, DEFAULT_PORT } from '../src/gateway-config.js';
+import { loadGatewayConfig, parseAllowedHosts, DEFAULT_HOST, DEFAULT_PORT } from '../src/gateway-config.js';
+
+test('parses and validates approved provider hosts', () => {
+  const hosts = parseAllowedHosts(' Example.COM,api.example.com., EXAMPLE.com ', 'ANSWER_ALLOWED_HOSTS');
+  assert.deepEqual(hosts, ['example.com', 'api.example.com.']);
+  assert.equal(Object.isFrozen(hosts), true);
+  assert.deepEqual(parseAllowedHosts(undefined, 'ANSWER_ALLOWED_HOSTS'), []);
+  assert.equal(Object.isFrozen(parseAllowedHosts(undefined, 'ANSWER_ALLOWED_HOSTS')), true);
+
+  for (const [value, offending] of [
+    ['', '""'],
+    ['example.com,', '""'],
+    ['https://example.com', 'https://example.com'],
+    ['example.com:443', 'example.com:443'],
+    ['example.com/path', 'example.com/path'],
+    ['-bad.example', '-bad.example'],
+    ['bad..example', 'bad..example']
+  ]) {
+    assert.throws(
+      () => parseAllowedHosts(value, 'ANSWER_ALLOWED_HOSTS'),
+      (error) => error instanceof TypeError && error.message.includes('ANSWER_ALLOWED_HOSTS') && error.message.includes(offending)
+    );
+  }
+});
 
 const baseEnv = {
   GATEWAY_TOKEN: 'a'.repeat(32),

@@ -4,6 +4,19 @@ export const DEFAULT_HOST = '127.0.0.1';
 export const DEFAULT_PORT = 8080;
 export const MINIMUM_TOKEN_LENGTH = 32;
 
+const HOSTNAME_PATTERN = /^(?=.{1,253}\.?$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*\.?$/u;
+
+export function parseAllowedHosts(value, name) {
+  if (value === undefined) return Object.freeze([]);
+  return Object.freeze(value.split(',').map((entry) => {
+    const hostname = entry.trim().toLowerCase();
+    if (!HOSTNAME_PATTERN.test(hostname)) {
+      throw new TypeError(`${name} contains an invalid hostname entry: ${JSON.stringify(entry.trim())}`);
+    }
+    return hostname;
+  }).filter((hostname, index, hosts) => hosts.indexOf(hostname) === index));
+}
+
 function requireEnv(env, name) {
   const value = env[name];
   if (typeof value !== 'string' || value.trim() === '') {

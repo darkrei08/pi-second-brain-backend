@@ -41,6 +41,28 @@ test('posts to the chat completions endpoint with a fixed patch', async () => {
   assert.equal(calls[0].init.headers.authorization, undefined);
 });
 
+test('allows only declared remote provider hosts and exempts loopback', async () => {
+  const approved = createOpenAICompatibleChat({
+    base_url: 'https://Models.Example.com./v1',
+    allowed_hosts: ['models.example.com'],
+    fetch: respondWith({ choices: [{ message: { content: 'ok' } }] })
+  });
+  assert.equal(await approved({ model_id: 'synthetic-chat', messages }), 'ok');
+
+  let called = false;
+  assert.throws(
+    () => createOpenAICompatibleChat({
+      base_url: 'https://unlisted.example.com/v1',
+      fetch: async () => { called = true; }
+    }),
+    (error) => error instanceof TypeError && error.message.includes('unlisted.example.com') && error.message.includes('ANSWER_ALLOWED_HOSTS')
+  );
+  assert.equal(called, false);
+
+  const loopback = createOpenAICompatibleChat({ base_url: 'http://localhost/v1', fetch: respondWith({ choices: [{ message: { content: 'ok' } }] }) });
+  assert.equal(await loopback({ model_id: 'synthetic-chat', messages }), 'ok');
+});
+
 test('refuses a non-loopback cleartext endpoint and a malformed configuration', () => {
   const fetch = respondWith({});
   assert.throws(() => createOpenAICompatibleChat({ base_url: 'http://models.example.com/v1', fetch }), /https unless the host is loopback/);
