@@ -21,11 +21,17 @@ Record evidenced dispositions, exposure ranking, verification commands, review, 
   - “R9 Tracker drift: the traceability matrix in odd/traceability.md is maintained by hand and can silently disagree with the code.”
   - “R10 Test gaps: no round trip against a real provider, no load test, no adversarial corpus fixture.”
 
+- S6. “R2 Corpus egress: question, evidence and answer leave the host for the model provider. Cleartext is loopback-only, but there is no egress allowlist and no audit record of what was sent.” Implemented as an approved-provider-host allowlist per client (`ANSWER_ALLOWED_HOSTS`, `EMBEDDING_ALLOWED_HOSTS`), fail-closed for any remote host, loopback exempt. Acceptance criteria: `.scratch/risk-register/issues/03-provider-egress-allowlist.md`.
+- S7. “R8 Deployment: schema changes require recreating the volume (init SQL runs only on an empty volume), so a real deployment faces a destructive upgrade path. No migrations runner, no backup story.” Implemented as a forward-only runner over the existing init files plus a rehearsed backup/restore. Acceptance criteria: `.scratch/risk-register/issues/04-migrations-and-restore.md`.
+
 ## Tasks
 
 - T1 — S2, S5 — Verify each candidate against source/tests and capture exact evidence — route: read-only source audit — status: done — commit: `26bb2760f962c9ede28893ed5d1263e2207b01d6`.
 - T2 — S1-S5 — Write the risk map, claimed audit issue, and this task record — route: documentation — status: done — commit: `26bb2760f962c9ede28893ed5d1263e2207b01d6`.
 - T3 — S1-S5 — Validate artifacts, commit on `feat/session-2`, run native review, save checkpoint — route: local verification and native review — status: done — commit: `26bb2760f962c9ede28893ed5d1263e2207b01d6`; push: prohibited.
+- T4 — S6 — Enforce the approved-provider allowlist for chat and embedding egress — route: developer subagent in an isolated worktree, test-first — status: in_progress — commit: pending.
+- T5 — S7 — Add the forward-only migration runner and rehearse backup/restore — route: developer subagent in an isolated worktree, test-first — status: pending — commit: pending.
+- T6 — S6, S7 — Native review of each work unit and the tracker closure — status: pending — commit: pending.
 
 ## Log
 
@@ -55,3 +61,5 @@ Finish with: a ranked list by exposure, the three mitigations worth doing before
 - L3. Drafted the destination map and claimed audit issue. The issue contains per-risk evidence, controls, residual risk, scores, verification commands, follow-up lines, ranking, pre-deployment actions, and rejected subclaims. The next task is structural validation, local commit, native review, and checkpoint.
 
 - L4. Structural readback found all required map sections, all R1-R10 records, and the audit/status labels; staged diff check passed. Primary work-unit commit `26bb2760f962c9ede28893ed5d1263e2207b01d6` is on `feat/session-2`. Native review `review-68c6a2cb9f916ec4` assessed the committed range as low/passive, approved it without reviewer captures, and was acknowledged. No tests or provider calls were run because this is documentation-only. The Engram checkpoint is saved. The risk register work unit is complete; no push.
+
+- L5. User directive, 2026-10-31, verbatim: “Primary directive: Recover the real project state, preserve verified knowledge, minimize active context, and resume reliable development through coordinated, deterministic workflows.” and “Do not stop after producing an analysis if an actionable, authorized implementation task exists.” Scope: the residual blockers stated at the end of the previous turn (R2, R5, R8) plus the native review of R1 that was left open. R5 is excluded from this round because physical purge versus tombstone semantics is an irreversible product decision that the user has not taken. R2 and R8 carry no such decision and proceed.
