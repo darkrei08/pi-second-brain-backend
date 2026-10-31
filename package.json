@@ -21,6 +21,7 @@
   "scripts": {
     "test": "node --test",
     "test:integration": "node --test test/integration/postgres-store.test.js test/integration/gateway.test.js",
+    "migrate": "node scripts/migrate.mjs",
     "start": "node src/gateway-cli.js"
   },
   "dependencies": {

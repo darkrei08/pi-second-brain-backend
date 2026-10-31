@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createStorage, describeRetrievalMode, resolveCitations, runEmbeddingBackfill, segmentDocument } from '../../src/index.js';
+import { applyMigrations, createStorage, describeRetrievalMode, resolveCitations, runEmbeddingBackfill, segmentDocument } from '../../src/index.js';
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integrationTest = databaseUrl ? test : test.skip;
@@ -200,6 +200,25 @@ async function removeDocument(documentId, ownerId) {
 if (pool) {
   test.after(async () => pool.end());
 }
+
+integrationTest('applies each schema migration once', async () => {
+  const client = await pool.connect();
+  try {
+    const firstRun = await applyMigrations(client);
+    assert.deepEqual(firstRun, [
+      '001-extensions.sql',
+      '002-schema.sql',
+      '003-segment-embeddings.sql',
+      '004-embedding-models.sql',
+      '005-collections.sql'
+    ]);
+    assert.deepEqual(await applyMigrations(client), []);
+    const recorded = await client.query('SELECT version FROM schema_migrations ORDER BY version');
+    assert.deepEqual(recorded.rows.map(({ version }) => version), firstRun);
+  } finally {
+    client.release();
+  }
+});
 
 integrationTest('stores and reads the complete segmented document contract', async () => {
   const storage = createStorage({ pool });
