@@ -20,11 +20,40 @@ function tokenMatches(expected, presented) {
   return timingSafeEqual(expectedBytes, presentedBytes);
 }
 
-export function createAuthenticator({ token, owner_id, shell_users = {} }) {
-  if (typeof token !== 'string' || token.length === 0) {
+function parsePrincipals(principals) {
+  if (!Array.isArray(principals) || principals.length === 0) {
+    throw new TypeError('principals must be a non-empty array of { token, owner_id }');
+  }
+  const seen = new Set();
+  return principals.map((principal) => {
+    if (principal === null || typeof principal !== 'object') {
+      throw new TypeError('principals must be a non-empty array of { token, owner_id }');
+    }
+    const { token: principalToken, owner_id: principalOwner } = principal;
+    if (typeof principalToken !== 'string' || principalToken.length === 0) {
+      throw new TypeError('principals must be a non-empty array of { token, owner_id }');
+    }
+    if (typeof principalOwner !== 'string' || !OPAQUE_ID_PATTERN.test(principalOwner)) {
+      throw new TypeError('principals must be a non-empty array of { token, owner_id }');
+    }
+    if (seen.has(principalToken)) {
+      throw new TypeError('principals must not contain a duplicate token');
+    }
+    seen.add(principalToken);
+    return Object.freeze({ token: principalToken, owner_id: principalOwner });
+  });
+}
+
+export function createAuthenticator({ token, owner_id, shell_users = {}, principals } = {}) {
+  const directory = principals === undefined ? undefined : parsePrincipals(principals);
+  if (directory !== undefined) {
+    if (Object.keys(shell_users).length > 0) {
+      throw new TypeError('principals cannot be combined with shell_users');
+    }
+  } else if (typeof token !== 'string' || token.length === 0) {
     throw new TypeError('token must be a non-empty string');
   }
-  if (typeof owner_id !== 'string' || !OPAQUE_ID_PATTERN.test(owner_id)) {
+  if (directory === undefined && (typeof owner_id !== 'string' || !OPAQUE_ID_PATTERN.test(owner_id))) {
     throw new TypeError('owner_id must be opaque');
   }
   // A null-prototype map plus an own-property check keeps __proto__ and friends out of the mapping.
@@ -36,7 +65,22 @@ export function createAuthenticator({ token, owner_id, shell_users = {} }) {
     authenticate(headers = {}) {
       const header = headers.authorization;
       const match = typeof header === 'string' ? AUTHORIZATION_PATTERN.exec(header) : null;
-      if (match === null || !tokenMatches(token, match[1])) {
+      if (match === null) {
+        throw unauthorized();
+      }
+      if (directory !== undefined) {
+        // The bearer token selects the principal, so a caller cannot name another identity.
+        let resolved;
+        for (const principal of directory) {
+          // NOTE: every principal is compared so the matched position cannot leak through timing.
+          if (tokenMatches(principal.token, match[1])) resolved = principal.owner_id;
+        }
+        if (resolved === undefined) {
+          throw unauthorized();
+        }
+        return { owner_id: resolved };
+      }
+      if (!tokenMatches(token, match[1])) {
         throw unauthorized();
       }
       if (!mapped) {

@@ -45,19 +45,66 @@ function parseShellUsers(value) {
   return mapping;
 }
 
+function parsePrincipals(value) {
+  const refuse = () => new TypeError(
+    'GATEWAY_PRINCIPALS must be a JSON array of { token, owner_id } with a token of at least 32 characters'
+  );
+  let parsed;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    throw refuse();
+  }
+  if (!Array.isArray(parsed) || parsed.length === 0) {
+    throw refuse();
+  }
+  const seen = new Set();
+  return parsed.map((entry) => {
+    if (entry === null || typeof entry !== 'object') throw refuse();
+    const { token, owner_id } = entry;
+    if (typeof token !== 'string' || token.length < MINIMUM_TOKEN_LENGTH) throw refuse();
+    if (typeof owner_id !== 'string' || !OPAQUE_ID_PATTERN.test(owner_id)) throw refuse();
+    if (seen.has(token)) throw refuse();
+    seen.add(token);
+    const principal = { owner_id };
+    // The token is not enumerable, so a logged config can never carry it.
+    Object.defineProperty(principal, 'token', { value: token, enumerable: false });
+    return Object.freeze(principal);
+  });
+}
+
 export function loadGatewayConfig(env = process.env) {
+  const database_url = requireEnv(env, 'DATABASE_URL');
+  const host = env.GATEWAY_HOST === undefined ? DEFAULT_HOST : requireEnv(env, 'GATEWAY_HOST');
+  const port = parsePort(env.GATEWAY_PORT);
+
+  if (env.GATEWAY_PRINCIPALS !== undefined) {
+    // Per-principal credentials are the whole identity boundary, so a second credential source would be ambiguous.
+    for (const legacy of ['GATEWAY_TOKEN', 'GATEWAY_OWNER_ID', 'GATEWAY_SHELL_USERS']) {
+      if (env[legacy] !== undefined) {
+        throw new TypeError(`GATEWAY_PRINCIPALS cannot be combined with ${legacy}`);
+      }
+    }
+    return Object.freeze({
+      host,
+      port,
+      principals: Object.freeze(parsePrincipals(env.GATEWAY_PRINCIPALS)),
+      shell_users: Object.freeze({}),
+      database_url
+    });
+  }
+
   const token = requireEnv(env, 'GATEWAY_TOKEN');
   if (token.length < MINIMUM_TOKEN_LENGTH) {
     throw new TypeError(`GATEWAY_TOKEN must be at least ${MINIMUM_TOKEN_LENGTH} characters`);
   }
-  const database_url = requireEnv(env, 'DATABASE_URL');
   const owner_id = requireEnv(env, 'GATEWAY_OWNER_ID');
   if (!OPAQUE_ID_PATTERN.test(owner_id)) {
     throw new TypeError('GATEWAY_OWNER_ID must be opaque');
   }
   const config = {
-    host: env.GATEWAY_HOST === undefined ? DEFAULT_HOST : requireEnv(env, 'GATEWAY_HOST'),
-    port: parsePort(env.GATEWAY_PORT),
+    host,
+    port,
     owner_id,
     shell_users: parseShellUsers(env.GATEWAY_SHELL_USERS),
     database_url

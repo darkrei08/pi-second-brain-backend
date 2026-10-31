@@ -76,3 +76,42 @@ test('never accepts an owner hinted by the caller', () => {
   });
   assert.deepEqual(result, { owner_id: 'owner-one' });
 });
+
+test('selects the owner from the presented principal token and ignores a caller hint', () => {
+  const principals = createAuthenticator({
+    principals: [
+      { token: 'p'.repeat(32), owner_id: 'owner-one' },
+      { token: 'q'.repeat(32), owner_id: 'owner-two' }
+    ],
+    shell_users: {}
+  });
+  assert.deepEqual(principals.authenticate({ authorization: `Bearer ${'p'.repeat(32)}` }), { owner_id: 'owner-one' });
+  assert.deepEqual(principals.authenticate({ authorization: `Bearer ${'q'.repeat(32)}` }), { owner_id: 'owner-two' });
+  assert.deepEqual(
+    principals.authenticate({ authorization: `Bearer ${'q'.repeat(32)}`, 'x-shell-user-id': 'shell-one' }),
+    { owner_id: 'owner-two' }
+  );
+  for (const token of [`Bearer ${'r'.repeat(32)}`, `Bearer ${'p'.repeat(33)}`, `Bearer ${'p'.repeat(31)}`]) {
+    assert.throws(
+      () => principals.authenticate({ authorization: token }),
+      (error) => {
+        assert.equal(error.status, 401);
+        assert.equal(error.code, 'unauthorized');
+        return true;
+      }
+    );
+  }
+});
+
+test('refuses a shell-user mapping or a duplicate token beside per-principal credentials', () => {
+  const principals = [{ token: 'p'.repeat(32), owner_id: 'owner-one' }];
+  assert.throws(
+    () => createAuthenticator({ principals, shell_users: { 'shell-one': 'owner-two' } }),
+    /shell_users/u
+  );
+  assert.throws(
+    () => createAuthenticator({ principals: [...principals, { token: 'p'.repeat(32), owner_id: 'owner-two' }] }),
+    /duplicate/u
+  );
+  assert.throws(() => createAuthenticator({ principals: [] }), /principals/u);
+});

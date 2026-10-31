@@ -55,3 +55,49 @@ test('refuses a configuration that would log or echo the token', () => {
   assert.equal(JSON.stringify(config).includes(config.token), false);
   assert.equal(String(config).includes(config.token), false);
 });
+
+test('loads per-principal credentials instead of a shared token and a caller-selected identity', () => {
+  const env = {
+    DATABASE_URL: baseEnv.DATABASE_URL,
+    GATEWAY_PRINCIPALS: JSON.stringify([
+      { token: 'p'.repeat(32), owner_id: 'owner-one' },
+      { token: 'q'.repeat(40), owner_id: 'owner-two' }
+    ])
+  };
+  const config = loadGatewayConfig(env);
+  assert.equal(config.principals.length, 2);
+  assert.deepEqual(config.principals.map((principal) => principal.owner_id), ['owner-one', 'owner-two']);
+  assert.equal(config.owner_id, undefined);
+  assert.deepEqual(config.shell_users, {});
+  for (const token of ['p'.repeat(32), 'q'.repeat(40)]) {
+    assert.equal(JSON.stringify(config).includes(token), false);
+    assert.equal(String(config).includes(token), false);
+  }
+});
+
+test('refuses a mixed shared-token and per-principal configuration', () => {
+  const principals = JSON.stringify([{ token: 'p'.repeat(32), owner_id: 'owner-one' }]);
+  assert.throws(() => loadGatewayConfig({ ...baseEnv, GATEWAY_PRINCIPALS: principals }), /GATEWAY_PRINCIPALS/u);
+  assert.throws(
+    () => loadGatewayConfig({
+      DATABASE_URL: baseEnv.DATABASE_URL,
+      GATEWAY_PRINCIPALS: principals,
+      GATEWAY_SHELL_USERS: JSON.stringify({ 'shell-one': 'owner-one' })
+    }),
+    /GATEWAY_PRINCIPALS/u
+  );
+});
+
+test('refuses malformed per-principal credentials', () => {
+  const load = (value) => loadGatewayConfig({ DATABASE_URL: baseEnv.DATABASE_URL, GATEWAY_PRINCIPALS: value });
+  assert.throws(() => load('not-json'), /GATEWAY_PRINCIPALS/u);
+  assert.throws(() => load(JSON.stringify({ token: 'p'.repeat(32), owner_id: 'owner-one' })), /GATEWAY_PRINCIPALS/u);
+  assert.throws(() => load(JSON.stringify([])), /GATEWAY_PRINCIPALS/u);
+  assert.throws(() => load(JSON.stringify([{ token: 'short', owner_id: 'owner-one' }])), /GATEWAY_PRINCIPALS/u);
+  assert.throws(() => load(JSON.stringify([{ token: 'p'.repeat(32), owner_id: '../other-owner' }])), /GATEWAY_PRINCIPALS/u);
+  assert.throws(() => load(JSON.stringify([{ token: 'p'.repeat(32) }])), /GATEWAY_PRINCIPALS/u);
+  assert.throws(
+    () => load(JSON.stringify([{ token: 'p'.repeat(32), owner_id: 'a' }, { token: 'p'.repeat(32), owner_id: 'b' }])),
+    /GATEWAY_PRINCIPALS/u
+  );
+});

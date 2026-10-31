@@ -36,7 +36,8 @@ const gateway = createGatewayServer({
   authenticator: createAuthenticator({
     token: config.token,
     owner_id: config.owner_id,
-    shell_users: config.shell_users
+    shell_users: config.shell_users,
+    principals: config.principals
   }),
   embed
 });
