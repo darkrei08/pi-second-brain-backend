@@ -8,22 +8,26 @@ Repository: `/root/git/personale/pi.dev/second-brain-stack`. Active worktree: `.
 
 Sealed and verified before this checkpoint: segmentation with provenance, parser normalization, PostgreSQL persistence with owner scoping, lexical/semantic/hybrid retrieval with collection scope, citation resolution and revalidation, model registry and coverage, embedding backfill, the OpenAI-compatible embedder, retrieval-mode description, the loopback HTTP gateway with per-principal identity, grounded answers with reported uncertainty, buffered and streaming chat completions, bounded research, and the Open WebUI filter and pipe.
 
-Mitigations delivered from the delivered-stack risk register:
+Mitigations delivered from the delivered-stack risk register, each its own commit:
 
 | Risk | State | Evidence |
 |---|---|---|
 | R1 shared bearer token | done | `f5602b5`; native review `review-c88c8279c7a63750` acknowledged; runtime-proven with two principals |
-| R2 provider egress | done | `a98fcd5a64a67c5f69956e5e25590a0038da7051`; declared-host allowlist, refusals proven at runtime |
-| R8 migrations and restore | done | `76fdadb4dd1aa3a2c9310d28800bc4dbca1ebbb7`; `pnpm migrate`, rehearsal recorded in the ticket |
-| R5 export and purge | **open, needs the operator** | tombstone versus physical purge is an irreversible product decision |
+| R2 provider egress | done | `a98fcd5`; declared-host allowlist, refusals proven at runtime |
+| R5 export and purge | done | `0fde30c`; tombstone is documented as non-erasure, purge physically deletes and cascades, export is owner-scoped |
+| R6 model-route limits | done | `5e3d631`; bounded concurrency plus a per-owner budget, 429 `model_busy` before any provider call |
+| R7 CI gate | done | `7aee02c`; two jobs through `pnpm run verify` and the migration script. The runner is unproven until a push |
+| R8 migrations and restore | done | `76fdadb`; `pnpm migrate`, rehearsal recorded in the ticket |
+| R9 traceability drift | done | `649cd9d`; two assertions in the normal suite |
+| R3, R4, R10 | open by nature | need a controlled real provider, a semantic-support evaluation and a load target |
 
 The register lives in `.scratch/risk-register/` with its map, ranking and per-risk evidence. `odd/traceability.md` carries one row per delivered requirement and its owning commit.
 
 ## Next actionable work, in order
 
-1. R5: decide tombstone versus purge semantics, then implement owner-scoped export plus the tested physical purge it implies. This is the only mitigation still blocking real-corpus use.
-2. R2's second half: emit an audit record of provider and model metadata per model call without logging evidence text.
-3. R6 rate and concurrency bound around model-backed routes; R7 a repository CI gate; R10 an opt-in provider smoke test and a bounded load test.
+1. R2's second half: emit an audit record of provider and model metadata per model call without logging evidence text. That is the last code gap in the register.
+2. R10: an opt-in smoke test against a controlled real provider and a bounded load test with a stated concurrency target; R3 and R4 follow the same provider work.
+3. Deployment decisions that are not code: scheduled backups and dump retention, TLS termination, metrics, packaging, and the chained pull-request plan for the 85-commit branch.
 4. Deferred with reasons: graph retrieval (needs entity and relationship provenance), ANN indexes (needs measured workload), parser benchmark, `/v1/search`, `/v1/memory/*`, TLS, metrics, deployment packaging.
 
 ## Commands
@@ -61,4 +65,4 @@ Engram project `second-brain-stack`. Useful topic keys: `second-brain-stack/reco
 
 ## Known gaps stated honestly
 
-The Open WebUI plugins are written and unit-tested but never loaded in a shell. No model call has reached a real provider; every one used a fake. No load test exists. R5 is unimplemented by decision. Nothing is pushed, so the whole stack lives in local branches only, and the branch is far past a single reviewable delivery slice.
+The Open WebUI plugins are written and unit-tested but never loaded in a shell. No model call has reached a real provider; every one used a fake. No load test exists. The CI workflow has never executed, because executing it needs a push. The purge cannot reach originals, caches, logs or backups outside PostgreSQL, which stays an operator procedure. Nothing is pushed, so the whole stack lives in local branches only, and the branch is far past a single reviewable delivery slice.
