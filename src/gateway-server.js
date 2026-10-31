@@ -7,6 +7,8 @@ import { describeRetrievalMode, segmentDocument } from './index.js';
 
 export const MAX_BODY_BYTES = 1024 * 1024;
 const MAX_CITATION_BATCH = 100;
+const MODEL_ROUTES = new Set(['POST /v1/answers', 'POST /v1/research', 'POST /v1/chat/completions']);
+const MODEL_WINDOW_MS = 60_000;
 const JSON_CONTENT_TYPE = /^application\/json(?:;|$)/iu;
 const UNAUTHENTICATED_PATHS = new Set(['/healthz', '/readyz']);
 const CHAT_COMPLETION_FIELDS = new Set(['model', 'messages', 'stream', 'collection_ids', 'embedding_model_id', 'limit', 'max_tokens']);
@@ -184,7 +186,16 @@ function writeChatChunk(response, chunk) {
   response.write(`data: ${JSON.stringify(chunk)}\n\n`);
 }
 
-export function createGatewayServer({ storage, authenticator, embed, chat, answer_model, max_body_bytes = MAX_BODY_BYTES } = {}) {
+export function createGatewayServer({
+  storage,
+  authenticator,
+  embed,
+  chat,
+  answer_model,
+  max_body_bytes = MAX_BODY_BYTES,
+  max_model_concurrency = 4,
+  model_requests_per_minute = 60
+} = {}) {
   if (storage === undefined || storage === null) {
     throw new TypeError('storage is required');
   }
@@ -203,6 +214,34 @@ export function createGatewayServer({ storage, authenticator, embed, chat, answe
   if (!Number.isInteger(max_body_bytes) || max_body_bytes < 1) {
     throw new TypeError('max_body_bytes must be a positive integer');
   }
+  if (!Number.isSafeInteger(max_model_concurrency) || max_model_concurrency < 1 || max_model_concurrency > 64) {
+    throw new TypeError('max_model_concurrency must be an integer between 1 and 64');
+  }
+  if (!Number.isSafeInteger(model_requests_per_minute) || model_requests_per_minute < 1 || model_requests_per_minute > 60000) {
+    throw new TypeError('model_requests_per_minute must be an integer between 1 and 60000');
+  }
+
+  let active_model_requests = 0;
+  const owner_budgets = new Map();
+  const acquireModelSlot = (owner_id) => {
+    const now = Date.now();
+    for (const [budget_owner, budget] of owner_budgets) {
+      if (now - budget.window_started_at >= MODEL_WINDOW_MS) owner_budgets.delete(budget_owner);
+    }
+    const budget = owner_budgets.get(owner_id);
+    if (active_model_requests >= max_model_concurrency || (budget?.requests ?? 0) >= model_requests_per_minute) {
+      throw new GatewayError(429, 'model_busy', 'Model capacity is temporarily unavailable');
+    }
+    active_model_requests += 1;
+    if (budget === undefined) owner_budgets.set(owner_id, { window_started_at: now, requests: 1 });
+    else budget.requests += 1;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      active_model_requests -= 1;
+    };
+  };
 
   const handlers = {
     'GET /healthz': () => ({ status: 200, body: { status: 'ok' } }),
@@ -450,7 +489,26 @@ export function createGatewayServer({ storage, authenticator, embed, chat, answe
         const body = await readJsonBody(request, max_body_bytes);
         requireObject(body, 'body');
         rejectCallerOwner(body);
-        return await handler({ body, query: url.searchParams, owner_id: identity.owner_id, response });
+        const route = `${request.method} ${url.pathname}`;
+        if (!MODEL_ROUTES.has(route)) {
+          return await handler({ body, query: url.searchParams, owner_id: identity.owner_id, response });
+        }
+        const release = acquireModelSlot(identity.owner_id);
+        let keepSlot = false;
+        const releaseOnResponseEnd = () => {
+          response.off('finish', releaseOnResponseEnd);
+          response.off('close', releaseOnResponseEnd);
+          release();
+        };
+        response.once('finish', releaseOnResponseEnd);
+        response.once('close', releaseOnResponseEnd);
+        try {
+          const result = await handler({ body, query: url.searchParams, owner_id: identity.owner_id, response });
+          keepSlot = result.streamed === true;
+          return result;
+        } finally {
+          if (!keepSlot) releaseOnResponseEnd();
+        }
       }
       return await handler({ body: {}, query: url.searchParams, owner_id: identity.owner_id });
     }

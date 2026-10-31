@@ -2,6 +2,8 @@ import { OPAQUE_ID_PATTERN } from './opaque-id.js';
 
 export const DEFAULT_HOST = '127.0.0.1';
 export const DEFAULT_PORT = 8080;
+export const DEFAULT_MODEL_CONCURRENCY = 4;
+export const DEFAULT_MODEL_REQUESTS_PER_MINUTE = 60;
 export const MINIMUM_TOKEN_LENGTH = 32;
 
 const HOSTNAME_PATTERN = /^(?=.{1,253}\.?$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*\.?$/u;
@@ -35,6 +37,19 @@ function parsePort(value) {
     throw new TypeError('GATEWAY_PORT must be an integer between 1 and 65535');
   }
   return port;
+}
+
+function parseModelLimit(env, name, defaultValue, maximum) {
+  const value = env[name];
+  if (value === undefined) return defaultValue;
+  if (typeof value !== 'string' || !/^\d+$/u.test(value)) {
+    throw new TypeError(`${name} must be an integer between 1 and ${maximum}`);
+  }
+  const limit = Number(value);
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > maximum) {
+    throw new TypeError(`${name} must be an integer between 1 and ${maximum}`);
+  }
+  return limit;
 }
 
 function parseShellUsers(value) {
@@ -90,6 +105,8 @@ export function loadGatewayConfig(env = process.env) {
   const database_url = requireEnv(env, 'DATABASE_URL');
   const host = env.GATEWAY_HOST === undefined ? DEFAULT_HOST : requireEnv(env, 'GATEWAY_HOST');
   const port = parsePort(env.GATEWAY_PORT);
+  const max_model_concurrency = parseModelLimit(env, 'GATEWAY_MODEL_CONCURRENCY', DEFAULT_MODEL_CONCURRENCY, 64);
+  const model_requests_per_minute = parseModelLimit(env, 'GATEWAY_MODEL_REQUESTS_PER_MINUTE', DEFAULT_MODEL_REQUESTS_PER_MINUTE, 60000);
 
   if (env.GATEWAY_PRINCIPALS !== undefined) {
     // Per-principal credentials are the whole identity boundary, so a second credential source would be ambiguous.
@@ -103,6 +120,8 @@ export function loadGatewayConfig(env = process.env) {
       port,
       principals: Object.freeze(parsePrincipals(env.GATEWAY_PRINCIPALS)),
       shell_users: Object.freeze({}),
+      max_model_concurrency,
+      model_requests_per_minute,
       database_url
     });
   }
@@ -120,6 +139,8 @@ export function loadGatewayConfig(env = process.env) {
     port,
     owner_id,
     shell_users: parseShellUsers(env.GATEWAY_SHELL_USERS),
+    max_model_concurrency,
+    model_requests_per_minute,
     database_url
   };
   // The token is not enumerable, so a logged config can never carry it.

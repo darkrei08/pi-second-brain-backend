@@ -42,6 +42,8 @@ const gateway = createGatewayServer({
   storage: createStorage({ pool }),
   chat,
   answer_model: process.env.ANSWER_MODEL,
+  max_model_concurrency: config.max_model_concurrency,
+  model_requests_per_minute: config.model_requests_per_minute,
   authenticator: createAuthenticator({
     token: config.token,
     owner_id: config.owner_id,

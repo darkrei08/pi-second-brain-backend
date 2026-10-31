@@ -43,8 +43,8 @@ function withServer(storage, options = {}) {
   return createGatewayServer({ storage, authenticator, answer_model: 'synthetic-chat', ...options });
 }
 
-async function call(gateway, path, { method = 'GET', headers = auth, body, rawBody, contentLength } = {}) {
-  const { port } = await gateway.start({ port: 0 });
+async function call(gateway, path, { method = 'GET', headers = auth, body, rawBody, contentLength, port: existingPort } = {}) {
+  const port = existingPort ?? (await gateway.start({ port: 0 })).port;
   const payload = rawBody ?? (body === undefined ? undefined : JSON.stringify(body));
   const requestHeaders = { ...headers };
   if (payload !== undefined && requestHeaders['content-type'] === undefined) {
@@ -66,8 +66,8 @@ async function call(gateway, path, { method = 'GET', headers = auth, body, rawBo
   });
 }
 
-async function callText(gateway, path, { method = 'GET', headers = auth, body } = {}) {
-  const { port } = await gateway.start({ port: 0 });
+async function callText(gateway, path, { method = 'GET', headers = auth, body, port: existingPort } = {}) {
+  const port = existingPort ?? (await gateway.start({ port: 0 })).port;
   return await new Promise((resolve, reject) => {
     const request = httpRequest({ host: '127.0.0.1', port, path, method, headers: { ...headers, 'content-type': 'application/json' } }, (response) => {
       const chunks = [];
@@ -764,6 +764,117 @@ test('aborts upstream streaming when the client disconnects', { timeout: 2000 },
   await aborted;
   assert.equal(signal.aborted, true);
   await gateway.stop();
+});
+
+test('bounds model-backed concurrency and releases slots after success and failure', { timeout: 3000 }, async () => {
+  let releaseChat;
+  let chatStarted;
+  const started = new Promise((resolve) => { chatStarted = resolve; });
+  const heldChat = new Promise((resolve) => { releaseChat = resolve; });
+  let chatCalls = 0;
+  const gateway = withServer(answerableStorage(), {
+    max_model_concurrency: 1,
+    chat: async () => {
+      chatCalls += 1;
+      if (chatCalls === 1) {
+        chatStarted();
+        await heldChat;
+      }
+      return 'answer [1].';
+    }
+  });
+  const { port } = await gateway.start({ port: 0 });
+  const first = call(gateway, '/v1/answers', {
+    port, method: 'POST', body: { question: 'first' }
+  });
+  await started;
+  const overloaded = await call(gateway, '/v1/answers', {
+    port, method: 'POST', body: { question: 'second' }
+  });
+  const retrieval = await call(gateway, '/v1/retrieval/query', {
+    port, method: 'POST', body: { query: 'independent route' }
+  });
+  releaseChat();
+  const firstResponse = await first;
+  await gateway.stop();
+  assert.equal(overloaded.status, 429);
+  assert.equal(overloaded.body.error.code, 'model_busy');
+  assert.equal(JSON.stringify(overloaded.body).includes('provider'), false);
+  assert.equal(chatCalls, 1);
+  assert.equal(firstResponse.status, 200);
+  assert.equal(retrieval.status, 200);
+
+  const errorGateway = withServer(answerableStorage(), {
+    max_model_concurrency: 1,
+    chat: async () => { throw new Error('unexpected handler failure'); }
+  });
+  const errorPort = (await errorGateway.start({ port: 0 })).port;
+  assert.equal((await call(errorGateway, '/v1/answers', { port: errorPort, method: 'POST', body: { question: 'error' } })).status, 500);
+  assert.equal((await call(errorGateway, '/v1/answers', { port: errorPort, method: 'POST', body: { question: 'after error' } })).status, 500);
+  await errorGateway.stop();
+});
+
+test('applies a fixed per-owner model budget and resets it without affecting other owners', { timeout: 3000 }, async () => {
+  const originalNow = Date.now;
+  let now = 1_000;
+  Date.now = () => now;
+  let modelCalls = 0;
+  const ownerOneToken = 'a'.repeat(32);
+  const ownerTwoToken = 'b'.repeat(32);
+  const budgetGateway = withServer(answerableStorage(), {
+    authenticator: createAuthenticator({ principals: [
+      { token: ownerOneToken, owner_id: 'owner-one' },
+      { token: ownerTwoToken, owner_id: 'owner-two' }
+    ] }),
+    model_requests_per_minute: 1,
+    chat: async () => { modelCalls += 1; return 'answer [1].'; }
+  });
+  const port = (await budgetGateway.start({ port: 0 })).port;
+  const ownerOne = { authorization: `Bearer ${ownerOneToken}` };
+  const ownerTwo = { authorization: `Bearer ${ownerTwoToken}` };
+  try {
+    assert.equal((await call(budgetGateway, '/v1/answers', { port, method: 'POST', headers: ownerOne, body: { question: 'first' } })).status, 200);
+    const exhausted = await call(budgetGateway, '/v1/research', { port, method: 'POST', headers: ownerOne, body: { question: 'second' } });
+    assert.equal(exhausted.status, 429);
+    assert.equal(exhausted.body.error.code, 'model_busy');
+    assert.equal(JSON.stringify(exhausted.body).includes('provider'), false);
+    assert.equal((await call(budgetGateway, '/v1/answers', { port, method: 'POST', headers: ownerTwo, body: { question: 'other owner' } })).status, 200);
+    assert.equal(modelCalls, 2);
+    now += 60_000;
+    assert.equal((await call(budgetGateway, '/v1/answers', { port, method: 'POST', headers: ownerOne, body: { question: 'reset' } })).status, 200);
+  } finally {
+    Date.now = originalNow;
+    await budgetGateway.stop();
+  }
+});
+
+test('holds a model slot until a streaming response ends', { timeout: 3000 }, async () => {
+  let releaseStream;
+  let streamStarted;
+  const started = new Promise((resolve) => { streamStarted = resolve; });
+  const heldStream = new Promise((resolve) => { releaseStream = resolve; });
+  const chat = async () => '';
+  chat.stream = async function* () {
+    streamStarted();
+    yield 'partial answer';
+    await heldStream;
+    yield ' complete [1].';
+  };
+  const gateway = withServer(answerableStorage(), { max_model_concurrency: 1, chat });
+  const { port } = await gateway.start({ port: 0 });
+  const stream = callText(gateway, '/v1/chat/completions', {
+    port, method: 'POST', body: { model: 'client', messages: [{ role: 'user', content: 'question' }], stream: true }
+  });
+  await started;
+  const overloaded = await call(gateway, '/v1/answers', { port, method: 'POST', body: { question: 'second' } });
+  releaseStream();
+  const streamed = await stream;
+  const afterStream = await call(gateway, '/v1/answers', { port, method: 'POST', body: { question: 'after stream' } });
+  await gateway.stop();
+  assert.equal(overloaded.status, 429);
+  assert.equal(overloaded.body.error.code, 'model_busy');
+  assert.equal(streamed.status, 200);
+  assert.notEqual(afterStream.status, 429);
 });
 
 test('streams empty-evidence answers without a model call and sanitizes post-header failures', async () => {

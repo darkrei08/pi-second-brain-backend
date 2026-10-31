@@ -37,6 +37,8 @@ test('loads the documented defaults and requires the token, database, and owner'
   assert.equal(config.host, DEFAULT_HOST);
   assert.equal(config.port, DEFAULT_PORT);
   assert.equal(config.owner_id, 'operator-owner');
+  assert.equal(config.max_model_concurrency, 4);
+  assert.equal(config.model_requests_per_minute, 60);
   assert.deepEqual(config.shell_users, {});
   assert.equal(DEFAULT_HOST, '127.0.0.1');
 
@@ -45,6 +47,29 @@ test('loads the documented defaults and requires the token, database, and owner'
   assert.throws(() => loadGatewayConfig({ ...baseEnv, DATABASE_URL: undefined }), /DATABASE_URL/);
   assert.throws(() => loadGatewayConfig({ ...baseEnv, GATEWAY_OWNER_ID: undefined }), /GATEWAY_OWNER_ID/);
   assert.throws(() => loadGatewayConfig({ ...baseEnv, GATEWAY_OWNER_ID: '../other-owner' }), /GATEWAY_OWNER_ID/);
+});
+
+test('parses bounded model route limits and refuses invalid values by variable name', () => {
+  const configured = loadGatewayConfig({
+    ...baseEnv,
+    GATEWAY_MODEL_CONCURRENCY: '12',
+    GATEWAY_MODEL_REQUESTS_PER_MINUTE: '900'
+  });
+  assert.equal(configured.max_model_concurrency, 12);
+  assert.equal(configured.model_requests_per_minute, 900);
+
+  for (const value of ['', '0', '1.5', '-1', '9007199254740992', '65']) {
+    assert.throws(
+      () => loadGatewayConfig({ ...baseEnv, GATEWAY_MODEL_CONCURRENCY: value }),
+      (error) => error instanceof TypeError && error.message.includes('GATEWAY_MODEL_CONCURRENCY')
+    );
+  }
+  for (const value of ['', '0', '1.5', '-1', '9007199254740992', '60001']) {
+    assert.throws(
+      () => loadGatewayConfig({ ...baseEnv, GATEWAY_MODEL_REQUESTS_PER_MINUTE: value }),
+      (error) => error instanceof TypeError && error.message.includes('GATEWAY_MODEL_REQUESTS_PER_MINUTE')
+    );
+  }
 });
 
 test('parses the port, the host override, and the shell-user mapping strictly', () => {
