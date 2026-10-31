@@ -34,7 +34,8 @@ Trackers, newest first: `.scratch/live-answers/`, `.scratch/http-gateway/`, `.sc
 ## Commands
 
 ```bash
-npm test                      # unit suite; integration cases self-skip
+pnpm install --frozen-lockfile   # only dependency is pg
+pnpm test                        # unit suite; integration cases self-skip
 NODE_OPTIONS=--max-old-space-size=1024 node src/gateway-cli.js   # needs env below
 ```
 
@@ -44,11 +45,11 @@ Integration needs a disposable pgvector instance; do not reuse the developer vol
 docker run -d --rm --name sbs-test-pg -e POSTGRES_HOST_AUTH_METHOD=trust \
   -e POSTGRES_USER=test -e POSTGRES_DB=test -p 127.0.0.1:55433:5432 pgvector/pgvector:pg17
 for f in docker/postgres/init/*.sql; do docker exec -i sbs-test-pg psql -U test -d test -v ON_ERROR_STOP=1 -q < "$f"; done
-TEST_DATABASE_URL='postgres://test@127.0.0.1:55433/test' npm run test:integration
+TEST_DATABASE_URL='postgres://test@127.0.0.1:55433/test' pnpm run test:integration
 docker rm -f sbs-test-pg
 ```
 
-Gateway environment: `DATABASE_URL`, `GATEWAY_TOKEN` (32+ chars), `GATEWAY_OWNER_ID`, optional `GATEWAY_HOST`, `GATEWAY_PORT`, `GATEWAY_SHELL_USERS`, `EMBEDDING_BASE_URL`, `EMBEDDING_API_KEY`, `ANSWER_BASE_URL`, `ANSWER_API_KEY`, `ANSWER_MODEL`.
+Gateway environment: `DATABASE_URL`, and either `GATEWAY_PRINCIPALS` (JSON array of `{token, owner_id}`; the bearer token alone selects the owner) or the legacy `GATEWAY_TOKEN` (32+ chars) with `GATEWAY_OWNER_ID` and optional `GATEWAY_SHELL_USERS`. Optional: `GATEWAY_HOST`, `GATEWAY_PORT`, `EMBEDDING_BASE_URL`, `EMBEDDING_API_KEY`, `ANSWER_BASE_URL`, `ANSWER_API_KEY`, `ANSWER_MODEL`.
 
 ## Working rules that this repository enforced
 

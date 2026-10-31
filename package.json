@@ -2,6 +2,7 @@
   "name": "second-brain-stack-segmentation",
   "version": "0.0.0",
   "private": true,
+  "packageManager": "pnpm@12.11.2",
   "type": "module",
   "engines": {
     "node": ">=22"
