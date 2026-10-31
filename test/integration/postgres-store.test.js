@@ -204,17 +204,18 @@ if (pool) {
 integrationTest('applies each schema migration once', async () => {
   const client = await pool.connect();
   try {
+    // The database may already be migrated by `pnpm migrate`, so only the second run is a guaranteed no-op.
     const firstRun = await applyMigrations(client);
-    assert.deepEqual(firstRun, [
+    assert.deepEqual(await applyMigrations(client), []);
+    const recorded = await client.query('SELECT version FROM schema_migrations ORDER BY version');
+    assert.deepEqual(recorded.rows.map(({ version }) => version), [
       '001-extensions.sql',
       '002-schema.sql',
       '003-segment-embeddings.sql',
       '004-embedding-models.sql',
       '005-collections.sql'
     ]);
-    assert.deepEqual(await applyMigrations(client), []);
-    const recorded = await client.query('SELECT version FROM schema_migrations ORDER BY version');
-    assert.deepEqual(recorded.rows.map(({ version }) => version), firstRun);
+    assert.deepEqual(firstRun.filter((version) => !recorded.rows.some((row) => row.version === version)), []);
   } finally {
     client.release();
   }
@@ -1107,6 +1108,24 @@ async function removeCollections(ownerId) {
   await pool.query('DELETE FROM collections WHERE owner_id = $1', [ownerId]);
 }
 
+test('validates lifecycle and export owners before querying', async () => {
+  const contactlessPool = {
+    connect() {
+      throw new Error('database must not be contacted');
+    },
+    query() {
+      throw new Error('database must not be contacted');
+    }
+  };
+  const storage = createStorage({ pool: contactlessPool });
+
+  await assert.rejects(storage.exportOwner('../owner'), /owner_id/);
+  await assert.rejects(storage.purgeDocument(document.document_id, '../owner'), /owner_id/);
+  await assert.rejects(storage.setDocumentRetention(document.document_id, '../owner', 'active'), /owner_id/);
+  await assert.rejects(storage.setDocumentRetention(document.document_id, document.retention.owner_id, 'purged'), /purgeDocument/);
+  await assert.rejects(storage.setDocumentRetention(document.document_id, document.retention.owner_id, 'unknown'), /state/);
+});
+
 test('rejects malformed collection scope before connecting', async () => {
   const storage = createStorage({ pool: { connect() { throw new Error('database must not be contacted'); } } });
   const contactlessPool = {
@@ -1414,6 +1433,105 @@ integrationTest('deletes a collection without deleting its documents or embeddin
   );
   assert.equal(embeddings.rows[0].count, documentSegments.length);
   await removeCollections(ownerId);
+});
+
+integrationTest('tombstones documents without erasing rows and stops retrieval', async () => {
+  const storage = createStorage({ pool });
+  await removeDocument(document.document_id, document.retention.owner_id);
+  await storage.saveDocumentAndSegments(document, result);
+
+  assert.equal(await storage.setDocumentRetention(document.document_id, document.retention.owner_id, 'tombstone'), 'tombstone');
+  assert.equal(await storage.getDocumentWithSegments(document.document_id, document.retention.owner_id) !== null, true);
+  assert.equal((await storage.searchSegmentsLexical({ query: 'invoice', owner_id: document.retention.owner_id })).length, 0);
+  const segments = await pool.query('SELECT count(*)::int AS count FROM segments WHERE document_id = $1', [document.document_id]);
+  assert.equal(segments.rows[0].count, result.segments.length);
+  await removeDocument(document.document_id, document.retention.owner_id);
+});
+
+integrationTest('purges owned documents with cascades and refuses another owner', async () => {
+  const storage = createStorage({ pool });
+  await seedCollections(storage);
+
+  await assert.rejects(storage.purgeDocument(collectionsAlphaDocument.document_id, collectionsOwnerB), /different owner/);
+  assert.notEqual(await storage.getDocumentWithSegments(collectionsAlphaDocument.document_id, collectionsOwnerA), null);
+  assert.deepEqual(await storage.purgeDocument('urn:document:purge-missing', collectionsOwnerA), {
+    documents: 0,
+    segments: 0,
+    embeddings: 0
+  });
+  assert.deepEqual(await storage.purgeDocument(collectionsAlphaDocument.document_id, collectionsOwnerA), {
+    documents: 1,
+    segments: 1,
+    embeddings: 1
+  });
+  for (const table of ['documents', 'segments', 'document_collections']) {
+    const result = await pool.query(`SELECT count(*)::int AS count FROM ${table} WHERE document_id = $1`, [collectionsAlphaDocument.document_id]);
+    assert.equal(result.rows[0].count, 0, `${table} should be cascaded`);
+  }
+  // segment_embeddings has no document_id column; it cascades through the segment foreign key.
+  const embeddings = await pool.query(`
+    SELECT count(*)::int AS count
+    FROM segment_embeddings AS e
+    JOIN segments AS s ON s.id = e.segment_id
+    WHERE s.document_id = $1
+  `, [collectionsAlphaDocument.document_id]);
+  assert.equal(embeddings.rows[0].count, 0, 'segment_embeddings should be cascaded');
+  await removeCollections(collectionsOwnerA);
+  await removeCollections(collectionsOwnerB);
+});
+
+integrationTest('exports deterministic owner-scoped documents and embedding metadata without vectors', async () => {
+  const storage = createStorage({ pool });
+  await seedCollections(storage);
+  const orderedDocument = {
+    ...semanticDocument,
+    retention: { owner_id: collectionsOwnerA, state: 'active' },
+    collections: [collectionAlpha]
+  };
+  const orderedResult = segmentDocument(orderedDocument, { max_segment_chars: 25 });
+  await removeDocument(orderedDocument.document_id, collectionsOwnerA);
+  await storage.saveDocumentAndSegments(orderedDocument, orderedResult);
+  for (const [model_id, dimensions, vectors] of [
+    [collectionsModel3d, 3, semanticVectors3d],
+    [collectionsModel4d, 4, semanticVectors4d]
+  ]) {
+    await storage.saveSegmentEmbeddings({
+      document_id: orderedDocument.document_id,
+      owner_id: collectionsOwnerA,
+      model_id,
+      dimensions,
+      embeddings: orderedResult.segments.map((segment, index) => ({ segment_id: segment.id, embedding: vectors[index] })),
+      created_at: orderedDocument.created_at
+    });
+  }
+
+  const exported = await storage.exportOwner(collectionsOwnerA);
+  assert.equal(exported.owner_id, collectionsOwnerA);
+  assert.deepEqual(exported.collections.map(({ collection_id }) => collection_id), [collectionAlpha, collectionBeta]);
+  assert.deepEqual(exported.documents.map(({ document_id }) => document_id), [
+    collectionsAlphaDocument.document_id,
+    collectionsBetaDocument.document_id,
+    collectionsUnscopedDocument.document_id,
+    orderedDocument.document_id
+  ]);
+  const alpha = exported.documents[0];
+  assert.deepEqual(alpha.collection_ids, [collectionAlpha]);
+  assert.deepEqual(alpha.segments.map(({ segment_index }) => segment_index), [0]);
+  assert.deepEqual(alpha.segments[0].embedding_metadata, [{ model_id: collectionsModel3d, dimensions: 3 }]);
+  assert.deepEqual(Object.keys(alpha.segments[0]).includes('embedding'), false);
+  const ordered = exported.documents.find(({ document_id }) => document_id === orderedDocument.document_id);
+  assert.deepEqual(ordered.segments.map(({ segment_index }) => segment_index), [0, 1, 2]);
+  assert.deepEqual(ordered.segments[0].embedding_metadata, [
+    { model_id: collectionsModel3d, dimensions: 3 },
+    { model_id: collectionsModel4d, dimensions: 4 }
+  ]);
+  assert.deepEqual(Object.keys(ordered.segments[0]).includes('embedding'), false);
+  assert.equal(JSON.stringify(exported).includes('[1,0,0]'), false);
+  assert.equal(exported.documents.some(({ document_id }) => document_id === collectionsForeignDocument.document_id), false);
+  assert.deepEqual(await storage.exportOwner(collectionsOwnerB).then(({ documents }) => documents.map(({ document_id }) => document_id)), [collectionsForeignDocument.document_id]);
+  await removeDocument(orderedDocument.document_id, collectionsOwnerA);
+  await removeCollections(collectionsOwnerA);
+  await removeCollections(collectionsOwnerB);
 });
 
 integrationTest('removes memberships when a document is deleted', async () => {

@@ -953,6 +953,144 @@ export function createStorage({ pool }) {
         [document_id, owner_id]
       );
       return result.rowCount === 1;
+    },
+
+    async setDocumentRetention(document_id, owner_id, state) {
+      if (typeof document_id !== 'string' || !DOCUMENT_ID_PATTERN.test(document_id)) {
+        throw new TypeError('document_id must be an opaque document URN');
+      }
+      requireOpaqueId(owner_id, 'owner_id');
+      if (state === 'purged') {
+        throw new Error('purged documents must be physically removed with purgeDocument');
+      }
+      if (state !== 'active' && state !== 'tombstone') {
+        throw new TypeError('state must be active or tombstone');
+      }
+      const { rows } = await pool.query(`
+        UPDATE documents
+        SET retention_state = $3
+        WHERE document_id = $1 AND owner_id = $2
+        RETURNING retention_state
+      `, [document_id, owner_id, state]);
+      return rows[0]?.retention_state ?? null;
+    },
+
+    async purgeDocument(document_id, owner_id) {
+      if (typeof document_id !== 'string' || !DOCUMENT_ID_PATTERN.test(document_id)) {
+        throw new TypeError('document_id must be an opaque document URN');
+      }
+      requireOpaqueId(owner_id, 'owner_id');
+
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        const documentRow = await client.query(
+          'SELECT owner_id FROM documents WHERE document_id = $1 FOR UPDATE',
+          [document_id]
+        );
+        if (documentRow.rowCount === 0) {
+          await client.query('COMMIT');
+          return { documents: 0, segments: 0, embeddings: 0 };
+        }
+        // Refuse a foreign owner instead of hiding an ownership violation as a missing-document no-op.
+        if (documentRow.rows[0].owner_id !== owner_id) {
+          throw new Error('document belongs to a different owner');
+        }
+        const counts = await client.query(`
+          SELECT
+            (SELECT count(*)::int FROM segments WHERE document_id = $1) AS segments,
+            (SELECT count(*)::int FROM segment_embeddings AS e
+             JOIN segments AS s ON s.id = e.segment_id
+             WHERE s.document_id = $1) AS embeddings
+        `, [document_id]);
+        const deleted = await client.query(
+          'DELETE FROM documents WHERE document_id = $1 AND owner_id = $2',
+          [document_id, owner_id]
+        );
+        await client.query('COMMIT');
+        return {
+          documents: deleted.rowCount,
+          segments: counts.rows[0].segments,
+          embeddings: counts.rows[0].embeddings
+        };
+      } catch (error) {
+        try {
+          await client.query('ROLLBACK');
+        } catch {
+          // Preserve the original database error.
+        }
+        throw error;
+      } finally {
+        client.release();
+      }
+    },
+
+    async exportOwner(owner_id) {
+      requireOpaqueId(owner_id, 'owner_id');
+      const collectionResult = await pool.query(`
+        SELECT collection_id, owner_id, created_at
+        FROM collections
+        WHERE owner_id = $1
+        ORDER BY collection_id
+      `, [owner_id]);
+      const documentResult = await pool.query(`
+        SELECT document_id, text, source_label, source_hash, lineage,
+               created_at, owner_id, retention_state
+        FROM documents
+        WHERE owner_id = $1
+        ORDER BY document_id
+      `, [owner_id]);
+      const membershipResult = await pool.query(`
+        SELECT document_id, collection_id
+        FROM document_collections
+        WHERE owner_id = $1
+        ORDER BY document_id, collection_id
+      `, [owner_id]);
+      const segmentResult = await pool.query(`
+        SELECT s.id AS segment_id, s.document_id, s.segment_index, s.text,
+               s.start_offset, s.end_offset, s.text_sha256, s.metadata, s.provenance,
+               e.model_id, e.dimensions
+        FROM documents AS d
+        JOIN segments AS s ON s.document_id = d.document_id
+        LEFT JOIN segment_embeddings AS e ON e.segment_id = s.id
+        WHERE d.owner_id = $1
+        ORDER BY s.document_id, s.segment_index, s.id, e.model_id
+      `, [owner_id]);
+
+      const memberships = new Map();
+      for (const row of membershipResult.rows) {
+        const ids = memberships.get(row.document_id) ?? [];
+        ids.push(row.collection_id);
+        memberships.set(row.document_id, ids);
+      }
+      const documents = new Map(documentResult.rows.map((row) => [row.document_id, {
+        document_id: row.document_id,
+        text: row.text,
+        source_label: row.source_label,
+        source_hash: row.source_hash,
+        lineage: row.lineage,
+        created_at: row.created_at,
+        retention: { owner_id: row.owner_id, state: row.retention_state },
+        collection_ids: memberships.get(row.document_id) ?? [],
+        segments: []
+      }]));
+      for (const row of segmentResult.rows) {
+        const exported = documents.get(row.document_id);
+        let segment = exported.segments.at(-1);
+        if (!segment || segment.id !== row.segment_id) {
+          segment = mapSegment(row);
+          segment.embedding_metadata = [];
+          exported.segments.push(segment);
+        }
+        if (row.model_id !== null) {
+          segment.embedding_metadata.push({ model_id: row.model_id, dimensions: row.dimensions });
+        }
+      }
+      return {
+        owner_id,
+        collections: collectionResult.rows.map((row) => ({ ...row })),
+        documents: [...documents.values()]
+      };
     }
   };
 }
