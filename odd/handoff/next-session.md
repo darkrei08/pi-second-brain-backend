@@ -63,6 +63,13 @@ State after a context reset, reconciled against Git and the tracker rather than 
 - Delivery plan: the repository policy is one stacked pull request per Wayfinder with the first targeting `main`. These 23 commits sit on the already-pushed `feat/live-answers` branch, so a single PR against it is the coherent slice; pushing and opening it is the operator's call.
 - Environment quirks confirmed again: `git log --not <refs>` without a positive revision returns nothing useful, so use `git rev-list --count <ref>..HEAD`. A commented colon-heavy `lensesReason` is refused as `lenses-invalid`. `START` needs a full 40-character `baseRef`, not `HEAD~1`.
 
+## Delivery and next frontier, 2026-11-02
+
+- Twelve stacked pull requests are open, `main` to `feat/session-2`: `#21`..`#34`. The four newest are `feat/collections-retrieval-scope` (`#31`), `feat/http-gateway` (`#32`), `feat/live-answers` (`#33`) and `feat/session-2` (`#34`). Nothing is merged; the chain merges in order and `main` is never written directly.
+- `.scratch/projects-and-chats/map.md` is the active Wayfinder: eight open tickets. The first is `01-folder-to-collection-scope.md`, and five of the eight are blocked by it, because the shell forwards a folder id as a collection reference while no gateway route can create a collection.
+- `.scratch/perf-baseline/report.md` holds the R10 numbers: `/v1/answers` p50 33.55 ms and p95 84.49 ms at concurrency 1, and a 50 percent `429 model_busy` rate at concurrency 4 with the shipped default `GATEWAY_MODEL_CONCURRENCY=4`. The real-provider smoke is blocked on a client key and a valid model id for the local proxy, and its embedding route answered `404`.
+- `docs/agents/tooling-evaluation.md` records the verdict on the fourteen proposed external projects: nine skips, five defers, no installs. `herdr-app`, `collie`, `hallmark`, `android/skills` and `Spark` each carry the trigger that would revive them.
+
 ## Working rules this repository enforces
 
 - ODD: feature document in `odd/tasks/`, verbatim `S#` specs, a `## Log`, a tracker ticket under `.scratch/<effort>/issues/`, test-first with observed RED, one work-unit commit per slice.
