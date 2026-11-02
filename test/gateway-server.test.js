@@ -408,30 +408,40 @@ test('reports an unregistered model as a caller error on coverage', async () => 
   assert.equal(response.body.error.code, 'invalid_request');
 });
 
-test('reports malformed seam input as a caller error', async () => {
+test('reports malformed seam input as a caller error without an incident trace', async () => {
   const storage = createRecordingStorage({
     searchSegmentsLexical: async () => {
       throw new TypeError('query must be non-empty text');
     }
   });
-  const gateway = withServer(storage);
+  const traces = [];
+  const gateway = withServer(storage, { trace: (event) => traces.push(event) });
   const response = await call(gateway, '/v1/retrieval/query', { method: 'POST', body: { query: 'invoice' } });
   await gateway.stop();
   assert.equal(response.status, 400);
   assert.deepEqual(response.body, { error: { code: 'invalid_request', message: 'query must be non-empty text' } });
+  assert.deepEqual(traces, []);
 });
 
-test('reports an unexpected dependency failure without leaking it', async () => {
+test('reports an unexpected dependency failure with one sanitized trace', async () => {
   const storage = createRecordingStorage({
     searchSegmentsLexical: async () => {
       throw new Error('relation "segments" does not exist at /var/lib/postgresql/data');
     }
   });
-  const gateway = withServer(storage);
-  const response = await call(gateway, '/v1/retrieval/query', { method: 'POST', body: { query: 'invoice' } });
+  const traces = [];
+  const gateway = withServer(storage, { trace: (event) => traces.push(event) });
+  const response = await call(gateway, '/v1/retrieval/query', {
+    method: 'POST',
+    body: { query: 'invoice payload must not be logged', evidence: 'private evidence', answer: 'private answer' }
+  });
   await gateway.stop();
   assert.equal(response.status, 500);
   assert.deepEqual(response.body, { error: { code: 'internal_error', message: 'The request failed' } });
+  assert.deepEqual(traces, [{ event: 'gateway_unexpected_failure', route: 'POST /v1/retrieval/query', error_class: 'Error' }]);
+  assert.equal(JSON.stringify(traces).includes('invoice payload must not be logged'), false);
+  assert.equal(JSON.stringify(traces).includes('private evidence'), false);
+  assert.equal(JSON.stringify(traces).includes('private answer'), false);
 });
 
 function answerableStorage() {

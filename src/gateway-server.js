@@ -203,7 +203,8 @@ export function createGatewayServer({
   max_body_bytes = MAX_BODY_BYTES,
   max_model_concurrency = 4,
   model_requests_per_minute = 60,
-  audit
+  audit,
+  trace = (event) => process.stderr.write(`${JSON.stringify(event)}\n`)
 } = {}) {
   if (storage === undefined || storage === null) {
     throw new TypeError('storage is required');
@@ -231,6 +232,9 @@ export function createGatewayServer({
   }
   if (audit !== undefined && typeof audit !== 'function') {
     throw new TypeError('audit must be a function when provided');
+  }
+  if (typeof trace !== 'function') {
+    throw new TypeError('trace must be a function when provided');
   }
 
   let active_model_requests = 0;
@@ -558,6 +562,17 @@ export function createGatewayServer({
       })
       .catch((error) => {
         const mapped = mapSeamFailure(error) ?? error;
+        if (mapped === error && !(error instanceof GatewayError) && !(error instanceof TypeError)) {
+          try {
+            trace(Object.freeze({
+              event: 'gateway_unexpected_failure',
+              route: `${request.method} ${new URL(request.url ?? '/', 'http://gateway.invalid').pathname}`,
+              error_class: error?.constructor?.name ?? 'UnknownError'
+            }));
+          } catch {
+            //NOTE: incident tracing must not mask the sanitized response.
+          }
+        }
         const { status, body } = errorPayload(mapped);
         const headers = mapped instanceof GatewayError && mapped.headers ? mapped.headers : {};
         if (response.destroyed) return;
