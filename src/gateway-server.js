@@ -10,6 +10,7 @@ export const MAX_BODY_BYTES = 1024 * 1024;
 const MAX_CITATION_BATCH = 100;
 const MODEL_ROUTES = new Set(['POST /v1/answers', 'POST /v1/research', 'POST /v1/chat/completions']);
 const MODEL_WINDOW_MS = 60_000;
+const READINESS_CACHE_MS = 30_000;
 const JSON_CONTENT_TYPE = /^application\/json(?:;|$)/iu;
 const UNAUTHENTICATED_PATHS = new Set(['/healthz', '/readyz']);
 const CHAT_COMPLETION_FIELDS = new Set(['model', 'messages', 'stream', 'collection_ids', 'embedding_model_id', 'limit', 'max_tokens']);
@@ -238,6 +239,7 @@ export function createGatewayServer({
   }
 
   let active_model_requests = 0;
+  let answer_provider_readiness = { checked_at: null, ready: false };
   const owner_budgets = new Map();
   const acquireModelSlot = (owner_id) => {
     const now = Date.now();
@@ -262,7 +264,6 @@ export function createGatewayServer({
   // One audit event per call that reaches a provider. Only metadata leaves this seam: the sink
   // must never receive question, evidence, answer, or citation text.
   const recordModelCall = async (kind, route, owner_id, model_id, call) => {
-    if (audit === undefined) return await call();
     const started_at = Date.now();
     let outcome = 'failed';
     try {
@@ -270,10 +271,12 @@ export function createGatewayServer({
       outcome = 'ok';
       return result;
     } finally {
-      try {
-        audit(Object.freeze({ event: 'model_call', kind, route, owner_id, model_id, outcome, duration_ms: Date.now() - started_at }));
-      } catch {
-        //NOTE: a broken sink must not fail or mask a request that already reached the provider.
+      if (audit !== undefined) {
+        try {
+          audit(Object.freeze({ event: 'model_call', kind, route, owner_id, model_id, outcome, duration_ms: Date.now() - started_at }));
+        } catch {
+          //NOTE: a broken sink must not fail or mask a request that already reached the provider.
+        }
       }
     }
   };
@@ -286,6 +289,26 @@ export function createGatewayServer({
         await storage.listEmbeddingModels();
       } catch {
         throw new GatewayError(503, 'not_ready', 'Storage is not reachable');
+      }
+      if (chat === undefined || answer_model === undefined) {
+        throw new GatewayError(503, 'not_ready', 'Answer provider is not configured');
+      }
+      const checked_at = answer_provider_readiness.checked_at;
+      if (checked_at === null || Date.now() - checked_at >= READINESS_CACHE_MS) {
+        try {
+          await recordModelCall('chat', 'GET /readyz', null, answer_model, () => chat({
+            model_id: answer_model,
+            messages: [{ role: 'user', content: 'health check' }],
+            max_tokens: 1
+          }));
+          answer_provider_readiness = Object.freeze({ checked_at: Date.now(), ready: true });
+        } catch {
+          answer_provider_readiness = Object.freeze({ checked_at: Date.now(), ready: false });
+          // The cached provider verdict below is the sanitized readiness response.
+        }
+      }
+      if (!answer_provider_readiness.ready) {
+        throw new GatewayError(503, 'not_ready', 'Answer provider is not reachable');
       }
       return { status: 200, body: { status: 'ready' } };
     },
