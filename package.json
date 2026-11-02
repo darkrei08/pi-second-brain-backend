@@ -16,6 +16,7 @@
   },
   "bin": {
     "segment-document": "./src/cli.js",
+    "ingest-directory": "./src/ingest-directory-cli.js",
     "second-brain-gateway": "./src/gateway-cli.js"
   },
   "scripts": {

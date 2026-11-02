@@ -7,4 +7,5 @@ export { runEmbeddingBackfill } from './embedding-backfill.js';
 export { createOpenAICompatibleEmbedder } from './embedding-client.js';
 export { describeRetrievalMode } from './retrieval-mode.js';
 export { answerQuestion } from './answer-question.js';
+export { ingestDirectory } from './ingest-directory.js';
 export { createOpenAICompatibleChat } from './chat-client.js';
