@@ -194,7 +194,8 @@ export function createGatewayServer({
   answer_model,
   max_body_bytes = MAX_BODY_BYTES,
   max_model_concurrency = 4,
-  model_requests_per_minute = 60
+  model_requests_per_minute = 60,
+  audit
 } = {}) {
   if (storage === undefined || storage === null) {
     throw new TypeError('storage is required');
@@ -220,6 +221,9 @@ export function createGatewayServer({
   if (!Number.isSafeInteger(model_requests_per_minute) || model_requests_per_minute < 1 || model_requests_per_minute > 60000) {
     throw new TypeError('model_requests_per_minute must be an integer between 1 and 60000');
   }
+  if (audit !== undefined && typeof audit !== 'function') {
+    throw new TypeError('audit must be a function when provided');
+  }
 
   let active_model_requests = 0;
   const owner_budgets = new Map();
@@ -241,6 +245,25 @@ export function createGatewayServer({
       released = true;
       active_model_requests -= 1;
     };
+  };
+
+  // One audit event per call that reaches a provider. Only metadata leaves this seam: the sink
+  // must never receive question, evidence, answer, or citation text.
+  const recordModelCall = async (kind, route, owner_id, model_id, call) => {
+    if (audit === undefined) return await call();
+    const started_at = Date.now();
+    let outcome = 'failed';
+    try {
+      const result = await call();
+      outcome = 'ok';
+      return result;
+    } finally {
+      try {
+        audit(Object.freeze({ event: 'model_call', kind, route, owner_id, model_id, outcome, duration_ms: Date.now() - started_at }));
+      } catch {
+        //NOTE: a broken sink must not fail or mask a request that already reached the provider.
+      }
+    }
   };
 
   const handlers = {
@@ -284,7 +307,8 @@ export function createGatewayServer({
         if (model === null) {
           throw new GatewayError(400, 'invalid_request', 'model_id is not registered');
         }
-        const vectors = await embed({ model_id, dimensions: model.dimensions, inputs: [body.query] });
+        const vectors = await recordModelCall('embedding', 'POST /v1/retrieval/query', owner_id, model_id, () =>
+          embed({ model_id, dimensions: model.dimensions, inputs: [body.query] }));
         query_embedding = vectors[0];
       }
       const matches = await storage.searchSegmentsHybrid({
@@ -310,22 +334,20 @@ export function createGatewayServer({
       if (chat === undefined || answer_model === undefined) {
         throw new GatewayError(503, 'answers_unavailable', 'No answer model is configured');
       }
-      return {
-        status: 200,
-        body: await answerQuestion({
-          storage,
-          chat,
-          embed,
-          question: body.question,
-          owner_id,
-          collection_ids: optionalCollectionIds(body),
-          // The chat model and the embedding model are different models with different identities.
-          model_id: answer_model,
-          embedding_model_id: embed === undefined ? undefined : body.embedding_model_id,
-          limit: body.limit ?? 6,
-          max_tokens: body.max_tokens ?? 600
-        })
-      };
+      const answer = await recordModelCall('chat', 'POST /v1/answers', owner_id, answer_model, () => answerQuestion({
+        storage,
+        chat,
+        embed,
+        question: body.question,
+        owner_id,
+        collection_ids: optionalCollectionIds(body),
+        // The chat model and the embedding model are different models with different identities.
+        model_id: answer_model,
+        embedding_model_id: embed === undefined ? undefined : body.embedding_model_id,
+        limit: body.limit ?? 6,
+        max_tokens: body.max_tokens ?? 600
+      }));
+      return { status: 200, body: answer };
     },
 
     'POST /v1/research': async ({ body, owner_id }) => {
@@ -333,21 +355,19 @@ export function createGatewayServer({
         throw new GatewayError(503, 'answers_unavailable', 'No answer model is configured');
       }
       researchRequest(body);
-      return {
-        status: 200,
-        body: await researchQuestion({
-          storage,
-          chat,
-          embed,
-          question: body.question,
-          owner_id,
-          collection_ids: optionalCollectionIds(body),
-          model_id: answer_model,
-          embedding_model_id: embed === undefined ? undefined : body.embedding_model_id,
-          limit: body.limit ?? 6,
-          max_tokens: body.max_tokens ?? 600
-        })
-      };
+      const answer = await recordModelCall('chat', 'POST /v1/research', owner_id, answer_model, () => researchQuestion({
+        storage,
+        chat,
+        embed,
+        question: body.question,
+        owner_id,
+        collection_ids: optionalCollectionIds(body),
+        model_id: answer_model,
+        embedding_model_id: embed === undefined ? undefined : body.embedding_model_id,
+        limit: body.limit ?? 6,
+        max_tokens: body.max_tokens ?? 600
+      }));
+      return { status: 200, body: answer };
     },
 
     'POST /v1/chat/completions': async ({ body, owner_id, response }) => {
@@ -368,7 +388,8 @@ export function createGatewayServer({
         max_tokens: body.max_tokens ?? 600
       };
       if (body.stream !== true) {
-        const answer = await answerQuestion(input);
+        const answer = await recordModelCall('chat', 'POST /v1/chat/completions', owner_id, answer_model, () =>
+          answerQuestion(input));
         return {
           status: 200,
           body: {
@@ -410,7 +431,8 @@ export function createGatewayServer({
       try {
         let answer;
         try {
-          answer = await answerQuestion({ ...input, on_delta: emit, signal: abortController.signal });
+          answer = await recordModelCall('chat', 'POST /v1/chat/completions', owner_id, answer_model, () =>
+            answerQuestion({ ...input, on_delta: emit, signal: abortController.signal }));
         } catch (error) {
           throw sanitizeStreamFailure(error);
         }

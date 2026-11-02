@@ -504,6 +504,67 @@ test('answers over evidence with a derived owner and the injected chat adapter',
   assert.equal(search.input.owner_id, 'owner-one');
 });
 
+test('records one audit event per provider call without any caller text', async () => {
+  const events = [];
+  const gateway = withServer(answerableStorage(), {
+    audit: (event) => events.push(event),
+    embed: async () => [[1, 0, 0]],
+    chat: async () => 'The invoice alpha is filed under the contract [1].'
+  });
+  const { port } = await gateway.start({ port: 0 });
+  const answered = await call(gateway, '/v1/answers', {
+    port,
+    method: 'POST',
+    body: { question: 'where is the invoice alpha?' }
+  });
+  const embedded = await call(gateway, '/v1/retrieval/query', {
+    port,
+    method: 'POST',
+    body: { mode: 'hybrid', query: 'sensitive query text', model_id: 'synthetic-3d' }
+  });
+  await gateway.stop();
+  assert.equal(answered.status, 200);
+  assert.equal(embedded.status, 200);
+  assert.deepEqual(
+    events.map(({ kind, route, model_id, outcome }) => `${kind} ${route} ${model_id} ${outcome}`),
+    ['chat POST /v1/answers synthetic-chat ok', 'embedding POST /v1/retrieval/query synthetic-3d ok']
+  );
+  assert.equal(events.every((event) => event.event === 'model_call'), true);
+  assert.equal(events.every((event) => event.owner_id === 'owner-one'), true);
+  assert.equal(events.every((event) => Number.isInteger(event.duration_ms)), true);
+  const serialized = JSON.stringify(events);
+  for (const text of ['where is the invoice alpha', 'invoice alpha is filed', 'sensitive query text', 'contract [1]']) {
+    assert.equal(serialized.includes(text), false);
+  }
+
+  const failed = [];
+  const failing = withServer(answerableStorage(), {
+    audit: (event) => failed.push(event),
+    chat: async () => { throw new Error('provider down'); }
+  });
+  const failedResponse = await call(failing, '/v1/answers', { method: 'POST', body: { question: 'error case' } });
+  await failing.stop();
+  assert.equal(failedResponse.status, 500);
+  assert.equal(failed.length, 1);
+  assert.equal(failed[0].outcome, 'failed');
+
+  const budgeted = [];
+  const capped = withServer(answerableStorage(), {
+    audit: (event) => budgeted.push(event),
+    model_requests_per_minute: 1,
+    chat: async () => 'answer [1].'
+  });
+  const cappedPort = (await capped.start({ port: 0 })).port;
+  const first = await call(capped, '/v1/answers', { port: cappedPort, method: 'POST', body: { question: 'first' } });
+  const refused = await call(capped, '/v1/answers', { port: cappedPort, method: 'POST', body: { question: 'second' } });
+  await capped.stop();
+  assert.equal(first.status, 200);
+  assert.equal(refused.status, 429);
+  assert.equal(budgeted.length, 1);
+
+  assert.throws(() => withServer(answerableStorage(), { audit: 'stderr' }), /audit must be a function/);
+});
+
 test('refuses an answer request without a configured model and without authentication', async () => {
   const unconfigured = withServer(answerableStorage(), { chat: undefined, answer_model: undefined });
   const unavailable = await expectStatus(
