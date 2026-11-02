@@ -114,6 +114,119 @@ test('drives ingest, retrieval, and citation revalidation over HTTP', { skip: !p
   }
 });
 
+test('ingest creates an owner collection and idempotent membership through HTTP', { skip: !pool }, async () => {
+  const storage = createStorage({ pool });
+  const document_id = 'urn:document:gateway-collection-ingest';
+  const folder_id = 'shell-folder-idempotent';
+  await pool.query('DELETE FROM documents WHERE owner_id = $1', [owner_id]);
+  await pool.query('DELETE FROM collections WHERE owner_id = $1', [owner_id]);
+
+  const gateway = createGatewayServer({
+    storage,
+    authenticator: createAuthenticator({ token, owner_id, shell_users: {} })
+  });
+  const { url } = await gateway.start({ port: 0 });
+  const body = {
+    document: {
+      document_id,
+      text: 'invoice alpha',
+      source_label: 'gateway-collection-ingest.txt',
+      source_hash: `sha256:${'a1'.repeat(32)}`,
+      lineage: { parser: 'synthetic-parser@1.0.0', model: null },
+      created_at: '2026-01-08T00:00:00Z',
+      collections: [folder_id, folder_id]
+    }
+  };
+
+  try {
+    assert.equal((await call(url, '/v1/documents/ingest', { method: 'POST', body })).status, 200);
+    assert.equal((await call(url, '/v1/documents/ingest', { method: 'POST', body })).status, 200);
+    const exported = await storage.exportOwner(owner_id);
+    assert.equal(exported.collections.length, 1);
+    assert.deepEqual(exported.collections[0].collection_id, folder_id);
+    assert.deepEqual(exported.collections[0].owner_id, owner_id);
+    assert.match(exported.collections[0].created_at, /^\d{4}-\d{2}-\d{2}T/u);
+    assert.deepEqual(exported.documents.map(({ document_id: id, collection_ids }) => ({ document_id: id, collection_ids })), [
+      { document_id, collection_ids: [folder_id] }
+    ]);
+  } finally {
+    await gateway.stop();
+    await pool.query('DELETE FROM documents WHERE owner_id = $1', [owner_id]);
+    await pool.query('DELETE FROM collections WHERE owner_id = $1', [owner_id]);
+  }
+});
+
+test('unknown and empty collection scopes return zero matches without read creation', { skip: !pool }, async () => {
+  const storage = createStorage({ pool });
+  const empty_folder_id = 'shell-folder-empty';
+  const unknown_folder_id = 'shell-folder-unknown';
+  await pool.query('DELETE FROM documents WHERE owner_id = $1', [owner_id]);
+  await pool.query('DELETE FROM collections WHERE owner_id = $1', [owner_id]);
+  await storage.createCollection({ collection_id: empty_folder_id, owner_id, created_at: '2026-01-08T00:00:00Z' });
+
+  const gateway = createGatewayServer({
+    storage,
+    authenticator: createAuthenticator({ token, owner_id, shell_users: {} })
+  });
+  const { url } = await gateway.start({ port: 0 });
+  try {
+    for (const collection_ids of [[unknown_folder_id], [empty_folder_id], []]) {
+      const response = await call(url, '/v1/retrieval/query', {
+        method: 'POST',
+        body: { query: 'invoice', collection_ids }
+      });
+      assert.equal(response.status, 200);
+      assert.deepEqual(response.body.matches, []);
+    }
+    const exported = await storage.exportOwner(owner_id);
+    assert.deepEqual(exported.collections.map(({ collection_id }) => collection_id), [empty_folder_id]);
+    assert.deepEqual(exported.documents, []);
+  } finally {
+    await gateway.stop();
+    await pool.query('DELETE FROM documents WHERE owner_id = $1', [owner_id]);
+    await pool.query('DELETE FROM collections WHERE owner_id = $1', [owner_id]);
+  }
+});
+
+test('ingest preserves an opaque folder id and stores no collection label', { skip: !pool }, async () => {
+  const storage = createStorage({ pool });
+  const document_id = 'urn:document:gateway-opaque-collection';
+  const folder_id = 'Folder.~opaque_7';
+  await pool.query('DELETE FROM documents WHERE owner_id = $1', [owner_id]);
+  await pool.query('DELETE FROM collections WHERE owner_id = $1', [owner_id]);
+
+  const gateway = createGatewayServer({
+    storage,
+    authenticator: createAuthenticator({ token, owner_id, shell_users: {} })
+  });
+  const { url } = await gateway.start({ port: 0 });
+  try {
+    const response = await call(url, '/v1/documents/ingest', {
+      method: 'POST',
+      body: {
+        document: {
+          document_id,
+          text: 'invoice opaque folder',
+          source_label: 'gateway-opaque-collection.txt',
+          source_hash: `sha256:${'b2'.repeat(32)}`,
+          lineage: { parser: 'synthetic-parser@1.0.0', model: null },
+          created_at: '2026-01-08T00:00:00Z',
+          collections: [folder_id]
+        }
+      }
+    });
+    assert.equal(response.status, 200);
+    const exported = await storage.exportOwner(owner_id);
+    assert.deepEqual(Object.keys(exported.collections[0]).sort(), ['collection_id', 'created_at', 'owner_id']);
+    assert.equal(exported.collections[0].collection_id, folder_id);
+    assert.deepEqual(exported.documents[0].collection_ids, [folder_id]);
+  } finally {
+    await gateway.stop();
+    await pool.query('DELETE FROM documents WHERE owner_id = $1', [owner_id]);
+    await pool.query('DELETE FROM collections WHERE owner_id = $1', [owner_id]);
+  }
+});
+
 test('refuses a document that another owner already holds', { skip: !pool }, async () => {
   const storage = createStorage({ pool });
   const document_id = 'urn:document:gateway-owner-clash';

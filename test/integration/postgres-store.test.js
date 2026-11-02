@@ -1148,10 +1148,6 @@ test('rejects malformed collection scope before connecting', async () => {
   );
   await assert.rejects(readOnly.listDocumentCollections(document.document_id, '../other-owner'), /owner_id/);
   await assert.rejects(
-    readOnly.searchSegmentsLexical({ query: 'invoice', owner_id: document.retention.owner_id, collection_ids: [] }),
-    /collection_ids/
-  );
-  await assert.rejects(
     readOnly.searchSegmentsLexical({ query: 'invoice', owner_id: document.retention.owner_id, collection_ids: 'synthetic-collection-alpha' }),
     /collection_ids/
   );
@@ -1166,20 +1162,6 @@ test('rejects malformed collection scope before connecting', async () => {
       owner_id: document.retention.owner_id,
       collection_ids: ['']
     }),
-    /collection_ids/
-  );
-  await assert.rejects(
-    readOnly.searchSegmentsHybrid({
-      query: 'invoice',
-      query_embedding: [1, 0, 0],
-      model_id: collectionsModel3d,
-      owner_id: document.retention.owner_id,
-      collection_ids: []
-    }),
-    /collection_ids/
-  );
-  await assert.rejects(
-    readOnly.listEmbeddingBackfill({ model_id: collectionsModel3d, owner_id: document.retention.owner_id, collection_ids: [] }),
     /collection_ids/
   );
   await assert.rejects(readOnly.createCollection({ collection_id: '../other-collection', owner_id: collectionsOwnerA }), /collection_id/);
@@ -1221,27 +1203,24 @@ integrationTest('ingests a document into zero, one, or many collections of its o
   await removeCollections(ownerId);
 });
 
-integrationTest('fails closed on an unknown or foreign collection before any write', async () => {
+integrationTest('creates unknown collections on ingest but rejects foreign ownership', async () => {
   const storage = createStorage({ pool });
   await seedCollections(storage);
   const ownerId = collectionsOwnerA;
-  const target = collectionDocument('urn:document:collections-rejected', 'invoice rejected', ownerId, [
-    'synthetic-collection-missing'
-  ]);
+  const missingCollection = 'synthetic-collection-missing';
+  const target = collectionDocument('urn:document:collections-rejected', 'invoice rejected', ownerId, [missingCollection]);
   await removeDocument(target.document_id, ownerId);
 
-  await assert.rejects(
-    storage.saveDocumentAndSegments(target, segmentDocument({ ...target, text: 'invoice rejected' }, { max_segment_chars: 100 })),
-    /collection/
-  );
-  assert.equal(await storage.getDocumentWithSegments(target.document_id, ownerId), null);
+  await storage.saveDocumentAndSegments(target, segmentDocument(target, { max_segment_chars: 100 }));
+  assert.deepEqual(await storage.listDocumentCollections(target.document_id, ownerId), [missingCollection]);
+  assert.ok((await storage.exportOwner(ownerId)).collections.some(({ collection_id }) => collection_id === missingCollection));
 
   const foreignTarget = { ...target, collections: [collectionForeign] };
   await assert.rejects(
     storage.saveDocumentAndSegments(foreignTarget, segmentDocument(foreignTarget, { max_segment_chars: 100 })),
     /collection/
   );
-  assert.equal(await storage.getDocumentWithSegments(target.document_id, ownerId), null);
+  assert.deepEqual(await storage.listDocumentCollections(target.document_id, ownerId), [missingCollection]);
 
   await assert.rejects(
     pool.query(
@@ -1250,6 +1229,7 @@ integrationTest('fails closed on an unknown or foreign collection before any wri
     ),
     /foreign key/
   );
+  await removeDocument(target.document_id, ownerId);
   await removeCollections(ownerId);
   await removeCollections(collectionsOwnerB);
 });

@@ -93,8 +93,8 @@ function validateQueryEmbedding({ query_embedding, model_id, owner_id, limit }) 
 
 function validateCollectionIds(collection_ids) {
   if (collection_ids === undefined) return null;
-  if (!Array.isArray(collection_ids) || collection_ids.length === 0) {
-    throw new TypeError('collection_ids must be a non-empty array of opaque collection ids');
+  if (!Array.isArray(collection_ids)) {
+    throw new TypeError('collection_ids must be an array of opaque collection ids');
   }
   const unique = [];
   for (const [index, collection_id] of collection_ids.entries()) {
@@ -354,6 +354,12 @@ export function createStorage({ pool }) {
       try {
         await client.query('BEGIN');
         if (collections.length > 0) {
+          await client.query(`
+            INSERT INTO collections (collection_id, owner_id, created_at)
+            SELECT declared.collection_id, $2, $3
+            FROM unnest($1::text[]) AS declared(collection_id)
+            ON CONFLICT (collection_id) DO NOTHING
+          `, [collections, owner_id, new Date().toISOString()]);
           const owned = await client.query(`
             SELECT collection_id
             FROM collections

@@ -4,6 +4,7 @@ import { createServer } from 'node:http';
 import { answerQuestion, researchQuestion } from './answer-question.js';
 import { GatewayError, errorPayload } from './gateway-error.js';
 import { describeRetrievalMode, segmentDocument } from './index.js';
+import { OPAQUE_ID_PATTERN } from './opaque-id.js';
 
 export const MAX_BODY_BYTES = 1024 * 1024;
 const MAX_CITATION_BATCH = 100;
@@ -97,12 +98,19 @@ function rejectCallerOwner(body) {
   }
 }
 
-function optionalCollectionIds(body) {
-  if (body.collection_ids === undefined) return undefined;
-  if (!Array.isArray(body.collection_ids) || body.collection_ids.length === 0) {
-    throw new GatewayError(400, 'invalid_request', 'collection_ids must be a non-empty array');
+function optionalCollectionIds(body, field = 'collection_ids') {
+  if (body[field] === undefined) return undefined;
+  if (!Array.isArray(body[field])) {
+    throw new GatewayError(400, 'invalid_request', `${field} must be an array of opaque collection ids`);
   }
-  return body.collection_ids;
+  const unique = [];
+  for (const [index, collection_id] of body[field].entries()) {
+    if (typeof collection_id !== 'string' || !OPAQUE_ID_PATTERN.test(collection_id)) {
+      throw new GatewayError(400, 'invalid_request', `${field}[${index}] must be an opaque collection id`);
+    }
+    if (!unique.includes(collection_id)) unique.push(collection_id);
+  }
+  return unique;
 }
 
 function researchRequest(body) {
@@ -468,7 +476,12 @@ export function createGatewayServer({
         requireObject(document.retention, 'document.retention');
         rejectCallerOwner(document.retention);
       }
-      const owned = Object.freeze({ ...document, retention: { owner_id, state: 'active' } });
+      const collections = optionalCollectionIds(document, 'collections');
+      const owned = Object.freeze({
+        ...document,
+        ...(collections === undefined ? {} : { collections }),
+        retention: { owner_id, state: 'active' }
+      });
       const result = segmentDocument(owned, { max_segment_chars: body.max_segment_chars ?? 1200 });
       await storage.saveDocumentAndSegments(owned, result);
       return {
