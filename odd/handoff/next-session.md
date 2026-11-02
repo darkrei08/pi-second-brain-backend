@@ -25,9 +25,9 @@ The register lives in `.scratch/risk-register/` with its map, ranking and per-ri
 
 ## Next actionable work, in order
 
-1. R2's second half: emit an audit record of provider and model metadata per model call without logging evidence text. That is the last code gap in the register.
+1. Delivery: push `feat/session-2` and open the stacked pull request against `feat/live-answers`. No code is waiting on anything else.
 2. R10: an opt-in smoke test against a controlled real provider and a bounded load test with a stated concurrency target; R3 and R4 follow the same provider work.
-3. Deployment decisions that are not code: scheduled backups and dump retention, TLS termination, metrics, packaging, and the chained pull-request plan for the 85-commit branch.
+3. Deployment decisions that are not code: scheduled backups and dump retention, log rotation for the audit line, TLS termination, metrics, packaging, and deleting the three orphaned workflow worktrees.
 4. Deferred with reasons: graph retrieval (needs entity and relationship provenance), ANN indexes (needs measured workload), parser benchmark, `/v1/search`, `/v1/memory/*`, TLS, metrics, deployment packaging.
 
 ## Commands
@@ -50,6 +50,18 @@ docker rm -f sbs-test-pg
 ```
 
 Gateway environment: `DATABASE_URL` plus either `GATEWAY_PRINCIPALS` (JSON array of `{token, owner_id}`) or the legacy `GATEWAY_TOKEN` with `GATEWAY_OWNER_ID`. Optional: `GATEWAY_HOST`, `GATEWAY_PORT`, `EMBEDDING_BASE_URL`, `EMBEDDING_API_KEY`, `EMBEDDING_ALLOWED_HOSTS`, `ANSWER_BASE_URL`, `ANSWER_API_KEY`, `ANSWER_ALLOWED_HOSTS`, `ANSWER_MODEL`. A remote provider host must be declared or startup is refused.
+
+## Recovery checkpoint, 2026-10-31 (third round)
+
+State after a context reset, reconciled against Git and the tracker rather than a summary.
+
+- Branch `feat/session-2`, clean tree, 87 commits ahead of `main`, all local. `origin/main` is at `600a476`. The eleven pushed `feat/<effort>` branches are all merged into this branch, so the newest remote tip is `origin/feat/live-answers` and this branch adds 23 commits on top of it.
+- Tracker: 18 effort directories under `.scratch/`, all 29 tickets resolved. No open Wayfinder ticket anywhere, so the frontier is empty and the next work has to come from this document or from the operator.
+- Register: R1, R2, R5, R6, R7, R8 and R9 mitigated and verified. R2's residual, the provider-call audit record, closed by ticket 08 in `33bba6d`.
+- Native reviews acknowledged: `review-c88c8279c7a63750`, `review-21dfcdd041638060`, `review-1aa4678c6075fe4d`, `review-199214a5c812cfb9`.
+- Leftovers to decide on, not deleted: three orphaned `pi-extensible-workflows/*` branches with their worktrees under `/root/.pi/workflows/.../worktrees/`, from runs whose agents failed. Nothing uncommitted lives there.
+- Delivery plan: the repository policy is one stacked pull request per Wayfinder with the first targeting `main`. These 23 commits sit on the already-pushed `feat/live-answers` branch, so a single PR against it is the coherent slice; pushing and opening it is the operator's call.
+- Environment quirks confirmed again: `git log --not <refs>` without a positive revision returns nothing useful, so use `git rev-list --count <ref>..HEAD`. A commented colon-heavy `lensesReason` is refused as `lenses-invalid`. `START` needs a full 40-character `baseRef`, not `HEAD~1`.
 
 ## Working rules this repository enforces
 
