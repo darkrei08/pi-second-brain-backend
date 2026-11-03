@@ -1,8 +1,7 @@
 {
-  "name": "second-brain-stack-segmentation",
+  "name": "pi-second-brain-backend",
   "version": "0.0.0",
-  "private": true,
-  "packageManager": "pnpm@12.11.2",
+  "private": false,
   "type": "module",
   "engines": {
     "node": ">=22"
@@ -22,7 +21,7 @@
   "scripts": {
     "test": "node --test",
     "test:integration": "node --test test/integration/postgres-store.test.js test/integration/gateway.test.js",
-    "verify": "pnpm test && pnpm run test:integration",
+    "verify": "npm test && npm run test:integration",
     "migrate": "node scripts/migrate.mjs",
     "start": "node src/gateway-cli.js"
   },
