@@ -70,6 +70,14 @@ State after a context reset, reconciled against Git and the tracker rather than 
 - `.scratch/perf-baseline/report.md` holds the R10 numbers: `/v1/answers` p50 33.55 ms and p95 84.49 ms at concurrency 1, and a 50 percent `429 model_busy` rate at concurrency 4 with the shipped default `GATEWAY_MODEL_CONCURRENCY=4`. The real-provider smoke is blocked on a client key and a valid model id for the local proxy, and its embedding route answered `404`.
 - `docs/agents/tooling-evaluation.md` records the verdict on the fourteen proposed external projects: nine skips, five defers, no installs. `herdr-app`, `collie`, `hallmark`, `android/skills` and `Spark` each carry the trigger that would revive them.
 
+## State after the R10 close, 2026-11-02
+
+- R10 is measured, not assumed: `deepseek-v4.1-flash` through the local proxy answered `/v1/answers` in 1128.23 ms with 260 input and 39 output tokens, and `/v1/chat/completions` in 1107.80 ms with 260 and 48. `claude-sonnet-4-6` sits in upstream quota cooldown (`429 model_cooldown`) and must not be used for smoke work. The proxy origin needs the `/v1` suffix, and it does not serve `/v1/embeddings` (`404`), so hybrid retrieval needs a separate embedding provider on this host.
+- Readiness had a false negative: the first implementation spent one completion token, that call failed, and a working provider was reported `not_ready` while both answer routes answered `200`. The corrected probe reads provider metadata under the same allowlist, caches for 30 seconds, never writes a `model_call` audit event, and was verified at runtime: `200` in 52 ms then `200` in 4 ms from cache, zero audit events, no key in the output.
+- The provider reports token usage on every call and this gateway discards it. That is measured, and it is the token-usage ticket, not a hypothesis.
+- Two branches are in flight from `ff3d8ee`, each in its own worktree: `feat/res-03-04` (shutdown and token usage) and `feat/proj-05-06` (collection suggestion and automatic filing). They merge back into `feat/session-2` before anything else is dispatched, because parallel writers on one tree corrupt each other and `worktree:` in a workflow dispatch still does not isolate anything.
+- A symlinked `node_modules` is what makes a fresh worktree testable without a second install: `ln -s .worktrees/session-2/node_modules <worktree>/node_modules`.
+
 ## Working rules this repository enforces
 
 - ODD: feature document in `odd/tasks/`, verbatim `S#` specs, a `## Log`, a tracker ticket under `.scratch/<effort>/issues/`, test-first with observed RED, one work-unit commit per slice.
