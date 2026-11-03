@@ -21,6 +21,8 @@ npm start
 
 The liveness endpoint is `GET /healthz`. Data routes require the configured gateway credentials and a migrated database. The migration command applies the SQL files in `docker/postgres/init/` exactly once.
 
+To accept shell-derived identity, set `GATEWAY_SHELL_CLAIM_SECRET` and keep the shared bearer token on each request. Send `x-shell-user-id`, `x-shell-group-id` (empty or omitted for user-scoped work), `x-shell-claim-expiry` (Unix seconds), and the lowercase hex `x-shell-claim-signature`. The signature is `HMAC-SHA256(secret, user_id + "\\n" + group_id + "\\n" + expiry)`. Valid claims derive `urn:group:<group_id>` or `urn:user:<user_id>`; claims older than now, more than 120 seconds ahead, or with a mismatched signature are refused. Without the claim headers, legacy owner resolution remains unchanged.
+
 ## Layout
 
 - `src/`: gateway, storage, ingestion, retrieval, and provider adapters

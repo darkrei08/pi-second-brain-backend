@@ -1,9 +1,10 @@
 import { createHash } from 'node:crypto';
 
+import { OWNER_ID_PATTERN } from './opaque-id.js';
+
 const DOCUMENT_ID_PATTERN = /^urn:document:[A-Za-z0-9][A-Za-z0-9._~-]*$/;
 const HASH_PATTERN = /^sha256:[0-9a-f]{64}$/;
 const RAW_HASH_PATTERN = /^[0-9a-f]{64}$/;
-const OPAQUE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._~-]*$/;
 
 function requireObject(value, name) {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
@@ -18,7 +19,7 @@ function requireText(value, name) {
 }
 
 function requireOpaqueId(value, name) {
-  if (typeof value !== 'string' || !OPAQUE_ID_PATTERN.test(value)) {
+  if (typeof value !== 'string' || !OWNER_ID_PATTERN.test(value)) {
     throw new TypeError(`${name} must be opaque`);
   }
 }

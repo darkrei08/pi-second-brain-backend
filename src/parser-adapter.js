@@ -1,7 +1,8 @@
+import { OWNER_ID_PATTERN } from './opaque-id.js';
+
 const PARSER_TYPES = new Set(['docling', 'mineru', 'paddleocr']);
 const DOCUMENT_ID_PATTERN = /^urn:document:[A-Za-z0-9][A-Za-z0-9._~-]*$/;
 const HASH_PATTERN = /^sha256:[0-9a-f]{64}$/;
-const OPAQUE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._~-]*$/;
 const RETENTION_STATES = new Set(['active', 'tombstone', 'purged']);
 const RFC3339_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/u;
 
@@ -36,7 +37,7 @@ function validateEnvelope(envelope) {
   if (envelope.lineage.model !== null && (typeof envelope.lineage.model !== 'string' || envelope.lineage.model.trim().length === 0)) fail('envelope.lineage.model is invalid');
   if (typeof envelope.created_at !== 'string' || !RFC3339_PATTERN.test(envelope.created_at) || Number.isNaN(Date.parse(envelope.created_at))) fail('envelope.created_at is invalid');
   requireObject(envelope.retention, 'envelope.retention');
-  if (typeof envelope.retention.owner_id !== 'string' || !OPAQUE_ID_PATTERN.test(envelope.retention.owner_id)) fail('envelope.retention.owner_id is invalid');
+  if (typeof envelope.retention.owner_id !== 'string' || !OWNER_ID_PATTERN.test(envelope.retention.owner_id)) fail('envelope.retention.owner_id is invalid');
   if (!RETENTION_STATES.has(envelope.retention.state)) fail('envelope.retention.state is invalid');
 }
 

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHmac } from 'node:crypto';
 import { request as httpRequest } from 'node:http';
 import { Readable } from 'node:stream';
 import test from 'node:test';
@@ -14,6 +15,20 @@ const authenticator = createAuthenticator({
   shell_users: { 'shell-one': 'owner-one' }
 });
 const auth = { authorization: `Bearer ${token}`, 'x-shell-user-id': 'shell-one' };
+const shellClaimSecret = 'shell-claim-secret';
+
+function shellClaimHeaders(user_id, group_id, expiry, signatureGroup = group_id) {
+  const signature = createHmac('sha256', shellClaimSecret)
+    .update(`${user_id}\n${signatureGroup}\n${expiry}`)
+    .digest('hex');
+  return {
+    authorization: `Bearer ${token}`,
+    'x-shell-user-id': user_id,
+    'x-shell-group-id': group_id,
+    'x-shell-claim-expiry': String(expiry),
+    'x-shell-claim-signature': signature
+  };
+}
 
 function createRecordingStorage(overrides = {}) {
   const calls = [];
@@ -210,6 +225,99 @@ test('authenticates every data route and refuses a caller-supplied owner', async
   );
   assert.equal(forged.body.error.code, 'invalid_request');
   assert.deepEqual(storage.calls, []);
+});
+
+test('derives owners from signed shell claims and refuses invalid claims at the HTTP boundary', async () => {
+  const now = Math.floor(Date.now() / 1000);
+  const storage = createRecordingStorage({
+    inspectEmbeddingCoverage: async ({ owner_id }) => ({ owner_id })
+  });
+  const gateway = withServer(storage, {
+    authenticator: createAuthenticator({ token, owner_id: 'operator-owner', shell_claim_secret: shellClaimSecret, now: () => now })
+  });
+  const port = (await gateway.start({ port: 0 })).port;
+  const first = await call(gateway, '/v1/models?model_id=synthetic-3d', {
+    port,
+    headers: shellClaimHeaders('shell-one', 'group-one', now + 60)
+  });
+  const second = await call(gateway, '/v1/models?model_id=synthetic-3d', {
+    port,
+    headers: shellClaimHeaders('shell-two', '', now + 60)
+  });
+  await gateway.stop();
+  assert.equal(first.status, 200);
+  assert.equal(first.body.coverage.owner_id, 'urn:group:group-one');
+  assert.equal(second.status, 200);
+  assert.equal(second.body.coverage.owner_id, 'urn:user:shell-two');
+
+  const forgedGateway = withServer(storage, {
+    authenticator: createAuthenticator({ token, owner_id: 'operator-owner', shell_claim_secret: shellClaimSecret, now: () => now })
+  });
+  const forgedHeaders = shellClaimHeaders('shell-one', 'group-one', now + 60);
+  const forgedSignature = forgedHeaders['x-shell-claim-signature'];
+  forgedHeaders['x-shell-claim-signature'] = `${forgedSignature.slice(0, -1)}${forgedSignature.endsWith('0') ? '1' : '0'}`;
+  const forged = await expectStatus(forgedGateway, '/v1/models', { headers: forgedHeaders }, 403);
+  assert.deepEqual(forged.body.error, {
+    code: 'invalid_claim',
+    message: 'The shell claim signature is invalid; request a fresh signed claim from the shell and try again.'
+  });
+
+  const expiredGateway = withServer(storage, {
+    authenticator: createAuthenticator({ token, owner_id: 'operator-owner', shell_claim_secret: shellClaimSecret, now: () => now })
+  });
+  const expired = await expectStatus(
+    expiredGateway,
+    '/v1/models',
+    { headers: shellClaimHeaders('shell-one', 'group-one', now - 1) },
+    403
+  );
+  assert.deepEqual(expired.body.error, {
+    code: 'invalid_claim',
+    message: 'The shell claim has expired; request a fresh signed claim from the shell and try again.'
+  });
+
+  const futureGateway = withServer(storage, {
+    authenticator: createAuthenticator({ token, owner_id: 'operator-owner', shell_claim_secret: shellClaimSecret, now: () => now })
+  });
+  const future = await expectStatus(
+    futureGateway,
+    '/v1/models',
+    { headers: shellClaimHeaders('shell-one', 'group-one', now + 121) },
+    403
+  );
+  assert.deepEqual(future.body.error, {
+    code: 'invalid_claim',
+    message: 'The shell claim expiry is too far in the future; check the shell clock and try again.'
+  });
+
+  const otherGroupGateway = withServer(storage, {
+    authenticator: createAuthenticator({ token, owner_id: 'operator-owner', shell_claim_secret: shellClaimSecret, now: () => now })
+  });
+  const otherGroup = await expectStatus(
+    otherGroupGateway,
+    '/v1/models',
+    { headers: shellClaimHeaders('shell-one', 'group-two', now + 60, 'group-one') },
+    403
+  );
+  assert.equal(otherGroup.body.error.code, 'invalid_claim');
+
+  const ownerBodyGateway = withServer(storage, {
+    authenticator: createAuthenticator({ token, owner_id: 'operator-owner', shell_claim_secret: shellClaimSecret, now: () => now })
+  });
+  const ownerBody = await expectStatus(
+    ownerBodyGateway,
+    '/v1/retrieval/query',
+    {
+      method: 'POST',
+      headers: shellClaimHeaders('shell-one', 'group-one', now + 60),
+      body: { query: 'invoice', owner_id: 'attacker-owner' }
+    },
+    400
+  );
+  assert.deepEqual(ownerBody.body.error, {
+    code: 'invalid_request',
+    message: 'owner_id is derived from the authenticated caller'
+  });
 });
 
 test('caps the body before parsing and requires JSON', async () => {

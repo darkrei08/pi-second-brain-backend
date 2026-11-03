@@ -1,6 +1,6 @@
 import { describeRetrievalMode } from './retrieval-mode.js';
 import { resolveCitations } from './citation-resolver.js';
-import { OPAQUE_ID_PATTERN } from './opaque-id.js';
+import { OWNER_ID_PATTERN } from './opaque-id.js';
 
 export const INSUFFICIENT_EVIDENCE_ANSWER =
   'I found no evidence for this question in the corpus, so I am not answering it.';
@@ -29,7 +29,7 @@ function requireText(value, name) {
 }
 
 function requireOpaqueId(value, name) {
-  if (typeof value !== 'string' || !OPAQUE_ID_PATTERN.test(value)) {
+  if (typeof value !== 'string' || !OWNER_ID_PATTERN.test(value)) {
     throw new TypeError(`${name} must be opaque`);
   }
 }

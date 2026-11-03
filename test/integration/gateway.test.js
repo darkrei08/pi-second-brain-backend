@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHmac } from 'node:crypto';
 import test from 'node:test';
 
 import { createAuthenticator } from '../../src/gateway-auth.js';
@@ -9,7 +10,21 @@ const databaseUrl = process.env.TEST_DATABASE_URL;
 const pg = databaseUrl ? (await import('pg')).default : null;
 const pool = pg ? new pg.Pool({ connectionString: databaseUrl }) : null;
 const token = 'g'.repeat(32);
+const shellClaimSecret = 'integration-shell-claim-secret';
 const owner_id = 'gateway-integration-owner';
+
+function shellClaimHeaders(user_id, group_id, expiry = Math.floor(Date.now() / 1000) + 60, signedGroup = group_id) {
+  const signature = createHmac('sha256', shellClaimSecret)
+    .update(`${user_id}\n${signedGroup}\n${expiry}`)
+    .digest('hex');
+  return {
+    'x-shell-user-id': user_id,
+    'x-shell-group-id': group_id,
+    'x-shell-claim-expiry': String(expiry),
+    'x-shell-claim-signature': signature
+  };
+}
+
 const collection_id = 'gateway-integration-collection';
 
 async function call(base, path, { method = 'GET', headers = {}, body } = {}) {
@@ -41,6 +56,68 @@ async function callText(base, path, { method = 'GET', headers = {}, body } = {})
 if (pool) {
   test.after(async () => pool.end());
 }
+
+test('isolates two signed callers through the HTTP surface', { skip: !pool }, async () => {
+  const storage = createStorage({ pool });
+  const groupA = 'integration-group-a';
+  const groupB = 'integration-group-b';
+  const ownerA = `urn:group:${groupA}`;
+  const ownerB = `urn:group:${groupB}`;
+  await pool.query('DELETE FROM documents WHERE owner_id = ANY($1::text[])', [[ownerA, ownerB]]);
+  await pool.query('DELETE FROM collections WHERE owner_id = ANY($1::text[])', [[ownerA, ownerB]]);
+
+  const gateway = createGatewayServer({
+    storage,
+    authenticator: createAuthenticator({ token, owner_id, shell_claim_secret: shellClaimSecret })
+  });
+  const { url } = await gateway.start({ port: 0 });
+  const callerA = shellClaimHeaders('shell-user-a', groupA);
+  const callerB = shellClaimHeaders('shell-user-b', groupB);
+  const document = (id, text) => ({
+    document: {
+      document_id: `urn:document:${id}`,
+      text,
+      source_label: `${id}.txt`,
+      source_hash: `sha256:${id === 'signed-a' ? 'aa'.repeat(32) : 'bb'.repeat(32)}`,
+      lineage: { parser: 'synthetic-parser@1.0.0', model: null },
+      created_at: '2026-01-04T00:00:00Z'
+    }
+  });
+
+  try {
+    assert.equal((await call(url, '/v1/documents/ingest', { method: 'POST', headers: callerA, body: document('signed-a', 'alpha invoice') })).status, 200);
+    assert.equal((await call(url, '/v1/documents/ingest', { method: 'POST', headers: callerB, body: document('signed-b', 'beta contract') })).status, 200);
+
+    const first = await call(url, '/v1/retrieval/query', { method: 'POST', headers: callerA, body: { query: 'invoice' } });
+    assert.equal(first.status, 200);
+    assert.deepEqual(first.body.matches.map(({ document_id }) => document_id), ['urn:document:signed-a']);
+
+    const second = await call(url, '/v1/retrieval/query', { method: 'POST', headers: callerB, body: { query: 'contract' } });
+    assert.equal(second.status, 200);
+    assert.deepEqual(second.body.matches.map(({ document_id }) => document_id), ['urn:document:signed-b']);
+
+    const forgedGroup = { ...callerA, 'x-shell-group-id': groupB };
+    const forged = await call(url, '/v1/retrieval/query', { method: 'POST', headers: forgedGroup, body: { query: 'invoice' } });
+    assert.deepEqual(forged, {
+      status: 403,
+      body: { error: { code: 'invalid_claim', message: 'The shell claim signature is invalid; request a fresh signed claim from the shell and try again.' } }
+    });
+
+    const ownerBody = await call(url, '/v1/retrieval/query', {
+      method: 'POST',
+      headers: callerA,
+      body: { query: 'invoice', owner_id: 'attacker-owner' }
+    });
+    assert.deepEqual(ownerBody, {
+      status: 400,
+      body: { error: { code: 'invalid_request', message: 'owner_id is derived from the authenticated caller' } }
+    });
+  } finally {
+    await gateway.stop();
+    await pool.query('DELETE FROM documents WHERE owner_id = ANY($1::text[])', [[ownerA, ownerB]]);
+    await pool.query('DELETE FROM collections WHERE owner_id = ANY($1::text[])', [[ownerA, ownerB]]);
+  }
+});
 
 test('drives ingest, retrieval, and citation revalidation over HTTP', { skip: !pool }, async () => {
   const storage = createStorage({ pool });

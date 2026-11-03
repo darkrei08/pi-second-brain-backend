@@ -1,4 +1,4 @@
-import { OPAQUE_ID_PATTERN } from './opaque-id.js';
+import { OPAQUE_ID_PATTERN, OWNER_ID_PATTERN } from './opaque-id.js';
 
 const DEFAULT_SEARCH_LIMIT = 20;
 const MAX_COLLECTION_SUGGESTIONS = 10;
@@ -28,7 +28,8 @@ function requireObject(value, name) {
 }
 
 function requireOpaqueId(value, name) {
-  if (typeof value !== 'string' || !OPAQUE_ID_PATTERN.test(value)) {
+  const pattern = name === 'owner_id' ? OWNER_ID_PATTERN : OPAQUE_ID_PATTERN;
+  if (typeof value !== 'string' || !pattern.test(value)) {
     throw new TypeError(`${name} must be opaque`);
   }
 }
@@ -275,7 +276,7 @@ function validateDocumentAndResult(document, result) {
     throw new TypeError('document.created_at must be RFC3339');
   }
   requireObject(document.retention, 'document.retention');
-  if (typeof document.retention.owner_id !== 'string' || !OPAQUE_ID_PATTERN.test(document.retention.owner_id)) {
+  if (typeof document.retention.owner_id !== 'string' || !OWNER_ID_PATTERN.test(document.retention.owner_id)) {
     throw new TypeError('document.retention.owner_id must be opaque');
   }
   if (!RETENTION_STATES.has(document.retention.state)) {

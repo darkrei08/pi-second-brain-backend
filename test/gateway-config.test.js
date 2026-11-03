@@ -40,6 +40,7 @@ test('loads the documented defaults and requires the token, database, and owner'
   assert.equal(config.max_model_concurrency, 3);
   assert.equal(config.model_requests_per_minute, 60);
   assert.deepEqual(config.shell_users, {});
+  assert.equal(config.shell_claim_secret, undefined);
   assert.equal(DEFAULT_HOST, '127.0.0.1');
 
   assert.throws(() => loadGatewayConfig({ ...baseEnv, GATEWAY_TOKEN: undefined }), /GATEWAY_TOKEN/);
@@ -70,6 +71,14 @@ test('parses bounded model route limits and refuses invalid values by variable n
       (error) => error instanceof TypeError && error.message.includes('GATEWAY_MODEL_REQUESTS_PER_MINUTE')
     );
   }
+});
+
+test('loads the optional shell claim secret without exposing it', () => {
+  const config = loadGatewayConfig({ ...baseEnv, GATEWAY_SHELL_CLAIM_SECRET: 'claim-secret' });
+  assert.equal(config.shell_claim_secret, 'claim-secret');
+  assert.equal(JSON.stringify(config).includes('claim-secret'), false);
+  assert.equal(String(config).includes('claim-secret'), false);
+  assert.throws(() => loadGatewayConfig({ ...baseEnv, GATEWAY_SHELL_CLAIM_SECRET: '' }), /GATEWAY_SHELL_CLAIM_SECRET/);
 });
 
 test('parses the port, the host override, and the shell-user mapping strictly', () => {

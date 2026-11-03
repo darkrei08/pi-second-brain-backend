@@ -1,5 +1,6 @@
+import { OWNER_ID_PATTERN, OPAQUE_ID_PATTERN } from './opaque-id.js';
+
 const DEFAULT_BACKFILL_LIMIT = 20;
-const OPAQUE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._~-]*$/;
 const REQUIRED_STORAGE_METHODS = ['listEmbeddingBackfill', 'getDocumentWithSegments', 'saveSegmentEmbeddings'];
 
 function requireObject(value, name) {
@@ -9,7 +10,8 @@ function requireObject(value, name) {
 }
 
 function requireOpaqueId(value, name) {
-  if (typeof value !== 'string' || !OPAQUE_ID_PATTERN.test(value)) {
+  const pattern = name === 'owner_id' ? OWNER_ID_PATTERN : OPAQUE_ID_PATTERN;
+  if (typeof value !== 'string' || !pattern.test(value)) {
     throw new TypeError(`${name} must be opaque`);
   }
 }

@@ -1,8 +1,9 @@
 import { createHash } from 'node:crypto';
 
+import { OPAQUE_ID_PATTERN, OWNER_ID_PATTERN } from './opaque-id.js';
+
 const HASH_PATTERN = /^sha256:[0-9a-f]{64}$/;
 const DOCUMENT_ID_PATTERN = /^urn:document:[A-Za-z0-9][A-Za-z0-9._~-]*$/;
-const OPAQUE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._~-]*$/;
 const RETENTION_STATES = new Set(['active', 'tombstone', 'purged']);
 const SENTENCE_ENDINGS = new Set(['.', '!', '?', '。', '！', '？']);
 const PUNCTUATION_BOUNDARIES = new Set([',', ';', ':', ')', ']', '}', '、', '。', '，', '；', '：']);
@@ -30,7 +31,8 @@ function requireHash(value, name) {
 }
 
 function requireOpaqueId(value, name) {
-  if (typeof value !== 'string' || !OPAQUE_ID_PATTERN.test(value)) {
+  const pattern = name === 'document.retention.owner_id' ? OWNER_ID_PATTERN : OPAQUE_ID_PATTERN;
+  if (typeof value !== 'string' || !pattern.test(value)) {
     fail(`${name} must be opaque`);
   }
 }

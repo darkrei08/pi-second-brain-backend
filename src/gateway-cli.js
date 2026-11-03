@@ -58,7 +58,8 @@ const gateway = createGatewayServer({
     token: config.token,
     owner_id: config.owner_id,
     shell_users: config.shell_users,
-    principals: config.principals
+    principals: config.principals,
+    shell_claim_secret: config.shell_claim_secret
   }),
   embed
 });

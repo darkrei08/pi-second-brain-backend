@@ -1,4 +1,4 @@
-import { OPAQUE_ID_PATTERN } from './opaque-id.js';
+import { OPAQUE_ID_PATTERN, OWNER_ID_PATTERN } from './opaque-id.js';
 
 export const DEFAULT_HOST = '127.0.0.1';
 export const DEFAULT_PORT = 8080;
@@ -65,7 +65,7 @@ function parseShellUsers(value) {
   }
   const mapping = {};
   for (const [shell_user_id, owner_id] of Object.entries(parsed)) {
-    if (!OPAQUE_ID_PATTERN.test(shell_user_id) || typeof owner_id !== 'string' || !OPAQUE_ID_PATTERN.test(owner_id)) {
+    if (!OPAQUE_ID_PATTERN.test(shell_user_id) || typeof owner_id !== 'string' || !OWNER_ID_PATTERN.test(owner_id)) {
       throw new TypeError('GATEWAY_SHELL_USERS must be a JSON object of shell user to owner id');
     }
     mapping[shell_user_id] = owner_id;
@@ -91,7 +91,7 @@ function parsePrincipals(value) {
     if (entry === null || typeof entry !== 'object') throw refuse();
     const { token, owner_id } = entry;
     if (typeof token !== 'string' || token.length < MINIMUM_TOKEN_LENGTH) throw refuse();
-    if (typeof owner_id !== 'string' || !OPAQUE_ID_PATTERN.test(owner_id)) throw refuse();
+    if (typeof owner_id !== 'string' || !OWNER_ID_PATTERN.test(owner_id)) throw refuse();
     if (seen.has(token)) throw refuse();
     seen.add(token);
     const principal = { owner_id };
@@ -99,6 +99,16 @@ function parsePrincipals(value) {
     Object.defineProperty(principal, 'token', { value: token, enumerable: false });
     return Object.freeze(principal);
   });
+}
+
+function freezeConfig(config, env) {
+  if (env.GATEWAY_SHELL_CLAIM_SECRET !== undefined) {
+    Object.defineProperty(config, 'shell_claim_secret', {
+      value: requireEnv(env, 'GATEWAY_SHELL_CLAIM_SECRET'),
+      enumerable: false
+    });
+  }
+  return Object.freeze(config);
 }
 
 export function loadGatewayConfig(env = process.env) {
@@ -115,7 +125,7 @@ export function loadGatewayConfig(env = process.env) {
         throw new TypeError(`GATEWAY_PRINCIPALS cannot be combined with ${legacy}`);
       }
     }
-    return Object.freeze({
+    return freezeConfig({
       host,
       port,
       principals: Object.freeze(parsePrincipals(env.GATEWAY_PRINCIPALS)),
@@ -123,7 +133,7 @@ export function loadGatewayConfig(env = process.env) {
       max_model_concurrency,
       model_requests_per_minute,
       database_url
-    });
+    }, env);
   }
 
   const token = requireEnv(env, 'GATEWAY_TOKEN');
@@ -131,7 +141,7 @@ export function loadGatewayConfig(env = process.env) {
     throw new TypeError(`GATEWAY_TOKEN must be at least ${MINIMUM_TOKEN_LENGTH} characters`);
   }
   const owner_id = requireEnv(env, 'GATEWAY_OWNER_ID');
-  if (!OPAQUE_ID_PATTERN.test(owner_id)) {
+  if (!OWNER_ID_PATTERN.test(owner_id)) {
     throw new TypeError('GATEWAY_OWNER_ID must be opaque');
   }
   const config = {
@@ -145,5 +155,5 @@ export function loadGatewayConfig(env = process.env) {
   };
   // The token is not enumerable, so a logged config can never carry it.
   Object.defineProperty(config, 'token', { value: token, enumerable: false });
-  return Object.freeze(config);
+  return freezeConfig(config, env);
 }
