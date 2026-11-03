@@ -37,7 +37,7 @@ test('loads the documented defaults and requires the token, database, and owner'
   assert.equal(config.host, DEFAULT_HOST);
   assert.equal(config.port, DEFAULT_PORT);
   assert.equal(config.owner_id, 'operator-owner');
-  assert.equal(config.max_model_concurrency, 4);
+  assert.equal(config.max_model_concurrency, 3);
   assert.equal(config.model_requests_per_minute, 60);
   assert.deepEqual(config.shell_users, {});
   assert.equal(DEFAULT_HOST, '127.0.0.1');

@@ -2,7 +2,7 @@ import { OPAQUE_ID_PATTERN } from './opaque-id.js';
 
 export const DEFAULT_HOST = '127.0.0.1';
 export const DEFAULT_PORT = 8080;
-export const DEFAULT_MODEL_CONCURRENCY = 4;
+export const DEFAULT_MODEL_CONCURRENCY = 3;
 export const DEFAULT_MODEL_REQUESTS_PER_MINUTE = 60;
 export const MINIMUM_TOKEN_LENGTH = 32;
 
