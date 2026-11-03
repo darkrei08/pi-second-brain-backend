@@ -204,7 +204,7 @@ if (pool) {
 integrationTest('applies each schema migration once', async () => {
   const client = await pool.connect();
   try {
-    // The database may already be migrated by `pnpm migrate`, so only the second run is a guaranteed no-op.
+    // The database may already be migrated by `npm run migrate`, so only the second run is a guaranteed no-op.
     const firstRun = await applyMigrations(client);
     assert.deepEqual(await applyMigrations(client), []);
     const recorded = await client.query('SELECT version FROM schema_migrations ORDER BY version');
