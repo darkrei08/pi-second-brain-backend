@@ -176,6 +176,7 @@ function validateAnswerInput(options = {}, allowStreaming = true) {
     limit = DEFAULT_LIMIT,
     max_tokens = 600,
     on_delta,
+    on_usage,
     signal
   } = options;
   requireText(question, 'question');
@@ -195,6 +196,9 @@ function validateAnswerInput(options = {}, allowStreaming = true) {
   if (on_delta !== undefined && typeof on_delta !== 'function') {
     throw new TypeError('on_delta must be a function when provided');
   }
+  if (on_usage !== undefined && typeof on_usage !== 'function') {
+    throw new TypeError('on_usage must be a function when provided');
+  }
   if (on_delta !== undefined && typeof chat.stream !== 'function') {
     throw new TypeError('chat.stream must be a function when on_delta is provided');
   }
@@ -207,10 +211,10 @@ function validateAnswerInput(options = {}, allowStreaming = true) {
   if (embedding_model_id !== undefined) {
     requireText(embedding_model_id, 'embedding_model_id');
   }
-  return { storage, chat, embed, question, owner_id, collection_ids, embedding_model_id, model_id, limit, max_tokens, on_delta, signal };
+  return { storage, chat, embed, question, owner_id, collection_ids, embedding_model_id, model_id, limit, max_tokens, on_delta, on_usage, signal };
 }
 
-async function answerFromMatches({ storage, chat, question, owner_id, model_id, max_tokens, on_delta, signal, matches, retrieval }) {
+async function answerFromMatches({ storage, chat, question, owner_id, model_id, max_tokens, on_delta, on_usage, signal, matches, retrieval }) {
   if (matches.length === 0) {
     return {
       answer: INSUFFICIENT_EVIDENCE_ANSWER,
@@ -223,6 +227,7 @@ async function answerFromMatches({ storage, chat, question, owner_id, model_id, 
   }
 
   const chatInput = { model_id, messages: buildAnswerPrompt(question, matches), max_tokens };
+  if (on_usage !== undefined) chatInput.on_usage = on_usage;
   if (signal !== undefined) chatInput.signal = signal;
   let rawAnswer;
   if (on_delta === undefined) {
@@ -279,15 +284,15 @@ async function answerFromMatches({ storage, chat, question, owner_id, model_id, 
 
 export async function answerQuestion(options = {}) {
   const input = validateAnswerInput(options);
-  const { storage, chat, embed, question, owner_id, collection_ids, embedding_model_id, model_id, limit, max_tokens, on_delta, signal } = input;
+  const { storage, chat, embed, question, owner_id, collection_ids, embedding_model_id, model_id, limit, max_tokens, on_delta, on_usage, signal } = input;
   const matches = await retrieve({ storage, embed, question, owner_id, collection_ids, embedding_model_id, limit });
   const retrieval = describeRetrievalMode(matches, embedding_model_id === undefined ? {} : { model_id: embedding_model_id });
-  return await answerFromMatches({ storage, chat, question, owner_id, model_id, max_tokens, on_delta, signal, matches, retrieval });
+  return await answerFromMatches({ storage, chat, question, owner_id, model_id, max_tokens, on_delta, on_usage, signal, matches, retrieval });
 }
 
 export async function researchQuestion(options = {}) {
   const input = validateAnswerInput(options, false);
-  const { storage, chat, embed, question, owner_id, collection_ids, embedding_model_id, model_id, limit, max_tokens, signal } = input;
+  const { storage, chat, embed, question, owner_id, collection_ids, embedding_model_id, model_id, limit, max_tokens, on_usage, signal } = input;
   const roundLimit = Math.ceil(limit / 3);
   const initial = await retrieve({ storage, embed, question, owner_id, collection_ids, embedding_model_id, limit: roundLimit });
   const matches = [];
@@ -306,6 +311,7 @@ export async function researchQuestion(options = {}) {
   addMatches(initial, roundLimit);
   if (matches.length > 0) {
     const plannerInput = { model_id, messages: buildResearchPlanPrompt(question, matches), max_tokens: 128 };
+    if (on_usage !== undefined) plannerInput.on_usage = on_usage;
     if (signal !== undefined) plannerInput.signal = signal;
     const plan = await chat(plannerInput);
     const queries = parseFollowUpQueries(plan, question);
@@ -323,5 +329,5 @@ export async function researchQuestion(options = {}) {
     }
   }
   const retrieval = describeRetrievalMode(matches, embedding_model_id === undefined ? {} : { model_id: embedding_model_id });
-  return await answerFromMatches({ storage, chat, question, owner_id, model_id, max_tokens, signal, matches, retrieval });
+  return await answerFromMatches({ storage, chat, question, owner_id, model_id, max_tokens, on_usage, signal, matches, retrieval });
 }

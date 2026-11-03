@@ -266,14 +266,32 @@ export function createGatewayServer({
   const recordModelCall = async (kind, route, owner_id, model_id, call) => {
     const started_at = Date.now();
     let outcome = 'failed';
+    const usage = {};
+    const on_usage = (reported) => {
+      if (reported === null || typeof reported !== 'object' || Array.isArray(reported)) return;
+      for (const field of ['prompt_tokens', 'completion_tokens']) {
+        if (Number.isSafeInteger(reported[field]) && reported[field] >= 0) {
+          usage[field] = (usage[field] ?? 0) + reported[field];
+        }
+      }
+    };
     try {
-      const result = await call();
+      const result = await call(on_usage);
       outcome = 'ok';
       return result;
     } finally {
       if (audit !== undefined) {
         try {
-          audit(Object.freeze({ event: 'model_call', kind, route, owner_id, model_id, outcome, duration_ms: Date.now() - started_at }));
+          audit(Object.freeze({
+            event: 'model_call',
+            kind,
+            route,
+            owner_id,
+            model_id,
+            outcome,
+            duration_ms: Date.now() - started_at,
+            ...usage
+          }));
         } catch {
           //NOTE: a broken sink must not fail or mask a request that already reached the provider.
         }
@@ -365,7 +383,7 @@ export function createGatewayServer({
       if (chat === undefined || answer_model === undefined) {
         throw new GatewayError(503, 'answers_unavailable', 'No answer model is configured');
       }
-      const answer = await recordModelCall('chat', 'POST /v1/answers', owner_id, answer_model, () => answerQuestion({
+      const answer = await recordModelCall('chat', 'POST /v1/answers', owner_id, answer_model, (on_usage) => answerQuestion({
         storage,
         chat,
         embed,
@@ -376,7 +394,8 @@ export function createGatewayServer({
         model_id: answer_model,
         embedding_model_id: embed === undefined ? undefined : body.embedding_model_id,
         limit: body.limit ?? 6,
-        max_tokens: body.max_tokens ?? 600
+        max_tokens: body.max_tokens ?? 600,
+        on_usage
       }));
       return { status: 200, body: answer };
     },
@@ -386,7 +405,7 @@ export function createGatewayServer({
         throw new GatewayError(503, 'answers_unavailable', 'No answer model is configured');
       }
       researchRequest(body);
-      const answer = await recordModelCall('chat', 'POST /v1/research', owner_id, answer_model, () => researchQuestion({
+      const answer = await recordModelCall('chat', 'POST /v1/research', owner_id, answer_model, (on_usage) => researchQuestion({
         storage,
         chat,
         embed,
@@ -396,7 +415,8 @@ export function createGatewayServer({
         model_id: answer_model,
         embedding_model_id: embed === undefined ? undefined : body.embedding_model_id,
         limit: body.limit ?? 6,
-        max_tokens: body.max_tokens ?? 600
+        max_tokens: body.max_tokens ?? 600,
+        on_usage
       }));
       return { status: 200, body: answer };
     },
@@ -419,8 +439,8 @@ export function createGatewayServer({
         max_tokens: body.max_tokens ?? 600
       };
       if (body.stream !== true) {
-        const answer = await recordModelCall('chat', 'POST /v1/chat/completions', owner_id, answer_model, () =>
-          answerQuestion(input));
+        const answer = await recordModelCall('chat', 'POST /v1/chat/completions', owner_id, answer_model, (on_usage) =>
+          answerQuestion({ ...input, on_usage }));
         return {
           status: 200,
           body: {
@@ -462,8 +482,8 @@ export function createGatewayServer({
       try {
         let answer;
         try {
-          answer = await recordModelCall('chat', 'POST /v1/chat/completions', owner_id, answer_model, () =>
-            answerQuestion({ ...input, on_delta: emit, signal: abortController.signal }));
+          answer = await recordModelCall('chat', 'POST /v1/chat/completions', owner_id, answer_model, (on_usage) =>
+            answerQuestion({ ...input, on_delta: emit, on_usage, signal: abortController.signal }));
         } catch (error) {
           throw sanitizeStreamFailure(error);
         }

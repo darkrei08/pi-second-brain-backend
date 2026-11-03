@@ -41,6 +41,31 @@ test('posts to the chat completions endpoint with a fixed patch', async () => {
   assert.equal(calls[0].init.headers.authorization, undefined);
 });
 
+test('reports provider token usage through the optional callback', async () => {
+  const usage = [];
+  const chat = createOpenAICompatibleChat({
+    base_url: 'http://127.0.0.1:11434/v1',
+    fetch: respondWith({
+      choices: [{ message: { content: 'The invoice is on page 2 [1].' } }],
+      usage: { prompt_tokens: 260, completion_tokens: 39 }
+    })
+  });
+  const answer = await chat({ model_id: 'synthetic-chat', messages, on_usage: (reported) => usage.push(reported) });
+  assert.equal(answer, 'The invoice is on page 2 [1].');
+  assert.deepEqual(usage, [{ prompt_tokens: 260, completion_tokens: 39 }]);
+  assert.equal(JSON.stringify(usage).includes('invoice'), false);
+});
+
+test('does not report token usage when the provider omits it', async () => {
+  const usage = [];
+  const chat = createOpenAICompatibleChat({
+    base_url: 'http://127.0.0.1:11434/v1',
+    fetch: respondWith({ choices: [{ message: { content: 'The invoice is on page 2 [1].' } }] })
+  });
+  await chat({ model_id: 'synthetic-chat', messages, on_usage: (reported) => usage.push(reported) });
+  assert.deepEqual(usage, []);
+});
+
 test('probes the declared model through metadata without posting a completion', async () => {
   const calls = [];
   const chat = createOpenAICompatibleChat({
