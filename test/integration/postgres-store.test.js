@@ -301,6 +301,65 @@ integrationTest('searches lexical matches with owner isolation and active retent
   await removeDocument(tombstoneDocument.document_id, tombstoneDocument.retention.owner_id);
 });
 
+integrationTest('retrieves natural-language lexical questions by term overlap', async () => {
+  const storage = createStorage({ pool });
+  const ownerA = 'synthetic-lexical-owner-a';
+  const ownerB = 'synthetic-lexical-owner-b';
+  const lexicalDocument = (documentId, text, ownerId) => ({
+    ...document,
+    document_id: documentId,
+    text,
+    source_label: `${documentId.slice('urn:document:'.length)}.txt`,
+    source_hash: `sha256:${String(documentId.length).padStart(2, '0').repeat(32)}`,
+    retention: { owner_id: ownerId, state: 'active' }
+  });
+  const questionDocument = lexicalDocument(
+    'urn:document:lexical-question',
+    'Il contratto di locazione scade il trentuno dicembre.',
+    ownerA
+  );
+  const overlapDocument = lexicalDocument('urn:document:lexical-overlap', 'alpha beta', ownerA);
+  const singleTermDocument = lexicalDocument('urn:document:lexical-single', 'alpha', ownerA);
+  const foreignDocument = lexicalDocument('urn:document:lexical-foreign', 'contratto', ownerB);
+  const candidates = [questionDocument, overlapDocument, singleTermDocument, foreignDocument];
+
+  for (const candidate of candidates) {
+    await removeDocument(candidate.document_id, candidate.retention.owner_id);
+    await storage.saveDocumentAndSegments(candidate, segmentDocument(candidate, { max_segment_chars: 100 }));
+  }
+
+  try {
+    assert.deepEqual(
+      (await storage.searchSegmentsLexical({
+        query: 'quando scade il contratto di locazione',
+        owner_id: ownerA,
+        limit: 10
+      })).map(({ document_id }) => document_id),
+      [questionDocument.document_id]
+    );
+    assert.deepEqual(
+      await storage.searchSegmentsLexical({ query: 'quando termina rinnovo', owner_id: ownerA, limit: 10 }),
+      []
+    );
+    assert.deepEqual(
+      (await storage.searchSegmentsLexical({ query: 'alpha beta gamma', owner_id: ownerA, limit: 10 }))
+        .map(({ document_id }) => document_id),
+      [overlapDocument.document_id, singleTermDocument.document_id]
+    );
+    assert.deepEqual(
+      await storage.searchSegmentsLexical({ query: '!!! ???', owner_id: ownerA, limit: 10 }),
+      []
+    );
+    const exactMatches = await storage.searchSegmentsLexical({ query: 'contratto', owner_id: ownerA, limit: 10 });
+    assert.deepEqual(exactMatches.map(({ document_id }) => document_id), [questionDocument.document_id]);
+    assert.equal(exactMatches.some(({ document_id }) => document_id === foreignDocument.document_id), false);
+  } finally {
+    for (const candidate of candidates) {
+      await removeDocument(candidate.document_id, candidate.retention.owner_id);
+    }
+  }
+});
+
 integrationTest('stores exact model-scoped cosine results and replaces embeddings deterministically', async () => {
   const storage = createStorage({ pool });
   await removeDocument(semanticDocument.document_id, semanticDocument.retention.owner_id);

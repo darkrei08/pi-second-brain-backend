@@ -829,12 +829,29 @@ export function createStorage({ pool }) {
           ORDER BY s.segment_index
           LIMIT 3
         ),
+        query_terms AS (
+          SELECT source_segments.source_text, term.lexeme
+          FROM source_segments
+          CROSS JOIN LATERAL (
+            SELECT lexeme
+            FROM unnest(tsvector_to_array(to_tsvector('simple', source_segments.source_text))) AS term(lexeme)
+            ORDER BY lexeme
+            LIMIT 32
+          ) AS term
+        ),
+        queries AS (
+          SELECT source_text,
+                 to_tsquery('simple', string_agg(quote_literal(lexeme), ' | ' ORDER BY lexeme)) AS tsquery
+          FROM query_terms
+          GROUP BY source_text
+        ),
         matches AS (
           SELECT dc.collection_id,
                  s.id AS segment_id,
-                 ts_rank_cd(s.search_vector, plainto_tsquery('simple', source_segments.source_text)) AS score
+                 ts_rank_cd(s.search_vector, queries.tsquery) AS score
           FROM source
           CROSS JOIN source_segments
+          JOIN queries ON queries.source_text = source_segments.source_text
           JOIN segments AS s ON s.document_id <> source.document_id
           JOIN documents AS d ON d.document_id = s.document_id
           JOIN document_collections AS dc
@@ -843,7 +860,7 @@ export function createStorage({ pool }) {
           WHERE source_segments.source_text <> ''
             AND d.owner_id = $2
             AND d.retention_state = 'active'
-            AND s.search_vector @@ plainto_tsquery('simple', source_segments.source_text)
+            AND s.search_vector @@ queries.tsquery
         ),
         ranked AS (
           SELECT collection_id, segment_id, score,
@@ -1037,16 +1054,31 @@ export function createStorage({ pool }) {
       const collectionIds = validateCollectionIds(collection_ids);
 
       const { rows } = await pool.query(`
+        WITH query_terms AS (
+          SELECT lexeme
+          FROM unnest(tsvector_to_array(to_tsvector('simple', $1))) AS term(lexeme)
+          ORDER BY lexeme
+          LIMIT 32
+        ),
+        query_terms_or AS (
+          SELECT CASE
+            WHEN count(*) = 0 THEN NULL::tsquery
+            ELSE to_tsquery('simple', string_agg(quote_literal(lexeme), ' | ' ORDER BY lexeme))
+          END AS tsquery
+          FROM query_terms
+        )
         SELECT
           s.id AS segment_id, s.document_id, s.segment_index, s.text,
           s.start_offset, s.end_offset, s.text_sha256, s.metadata, s.provenance,
           d.source_hash, d.source_label, d.owner_id, d.retention_state,
-          ts_rank_cd(s.search_vector, plainto_tsquery('simple', $1)) AS rank
+          ts_rank_cd(s.search_vector, query_terms_or.tsquery) AS rank
         FROM segments AS s
         JOIN documents AS d ON d.document_id = s.document_id
+        CROSS JOIN query_terms_or
         WHERE d.owner_id = $2
           AND d.retention_state = 'active'
-          AND s.search_vector @@ plainto_tsquery('simple', $1)
+          AND query_terms_or.tsquery IS NOT NULL
+          AND s.search_vector @@ query_terms_or.tsquery
           AND (
             $4::text[] IS NULL
             OR EXISTS (
