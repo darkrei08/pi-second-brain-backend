@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { request as httpRequest } from 'node:http';
+import { Readable } from 'node:stream';
 import test from 'node:test';
 
 import { createAuthenticator } from '../src/gateway-auth.js';
@@ -89,6 +90,15 @@ async function expectStatus(gateway, path, options, status) {
   return response;
 }
 
+async function callHandler(gateway, path, { headers = auth, rawBody = '', contentLength } = {}) {
+  const request = Readable.from(rawBody === '' ? [] : [rawBody]);
+  request.method = 'POST';
+  request.url = path;
+  request.headers = { ...headers, 'content-type': 'application/json' };
+  if (contentLength !== undefined) request.headers['content-length'] = contentLength;
+  return await gateway.handler(request, {});
+}
+
 test('serves liveness without a dependency and refuses unknown routes and methods', async () => {
   const storage = createRecordingStorage();
   const gateway = withServer(storage);
@@ -103,6 +113,7 @@ test('serves liveness without a dependency and refuses unknown routes and method
   const gateway2b = withServer(createRecordingStorage());
   const hidden = await expectStatus(gateway2b, '/v1/nope', { headers: {} }, 401);
   assert.equal(hidden.body.error.code, 'unauthorized');
+  assert.equal(hidden.body.error.message, 'Authentication is required; provide a valid bearer token and try again.');
 
   const gateway3 = withServer(createRecordingStorage());
   const wrongMethod = await expectStatus(gateway3, '/v1/models', { method: 'POST', headers: auth, body: {} }, 405);
@@ -111,6 +122,13 @@ test('serves liveness without a dependency and refuses unknown routes and method
 });
 
 test('reports readiness from storage and provider metadata without a completion or audit event', async () => {
+  const unconfiguredGateway = withServer(createRecordingStorage());
+  const unconfigured = await expectStatus(unconfiguredGateway, '/readyz', { headers: {} }, 503);
+  assert.deepEqual(unconfigured.body.error, {
+    code: 'not_ready',
+    message: 'Answer provider is not configured'
+  });
+
   const completionCalls = [];
   const probeCalls = [];
   const auditEvents = [];
@@ -160,6 +178,7 @@ test('reports readiness from storage and provider metadata without a completion 
   await failing.stop();
   assert.equal(response.status, 503);
   assert.equal(response.body.error.code, 'not_ready');
+  assert.equal(response.body.error.message, 'Storage is not reachable');
   assert.equal(JSON.stringify(response.body).includes('ECONNREFUSED'), false);
 });
 
@@ -226,6 +245,29 @@ test('caps the body before parsing and requires JSON', async () => {
   await malformed.stop();
   assert.equal(broken.status, 400);
   assert.equal(broken.body.error.code, 'invalid_json');
+});
+
+test('rejects malformed lengths, empty bodies, and non-object JSON bodies', async () => {
+  const malformedLength = withServer(createRecordingStorage());
+  const malformed = await assert.rejects(
+    () => callHandler(malformedLength, '/v1/retrieval/query', { rawBody: '{}', contentLength: 'not-a-number' }),
+    (error) => {
+      assert.equal(error.status, 400);
+      assert.equal(error.code, 'invalid_request');
+      assert.equal(error.message, 'Content-Length must be a byte count');
+      return true;
+    }
+  );
+  await malformedLength.stop();
+  assert.equal(malformed, undefined);
+
+  const emptyBody = withServer(createRecordingStorage());
+  const empty = await expectStatus(emptyBody, '/v1/retrieval/query', { method: 'POST', rawBody: '' }, 400);
+  assert.deepEqual(empty.body.error, { code: 'invalid_json', message: 'A JSON body is required' });
+
+  const nonObjectBody = withServer(createRecordingStorage());
+  const nonObject = await expectStatus(nonObjectBody, '/v1/retrieval/query', { method: 'POST', rawBody: '[]' }, 400);
+  assert.deepEqual(nonObject.body.error, { code: 'invalid_request', message: 'body must be an object' });
 });
 
 test('runs lexical and hybrid retrieval with the derived owner and the collection scope', async () => {
@@ -435,6 +477,21 @@ test('maps a refused ingest to a conflict and a missing collection to a caller e
   assert.equal(refused.body.error.code, 'invalid_request');
 });
 
+test('validates document ingest requests at the public route seam', async () => {
+  const cases = [
+    [{}, 'document must be an object'],
+    [{ document: [] }, 'document must be an object'],
+    [{ document: { retention: [] } }, 'document.retention must be an object'],
+    [{ document: { collections: {} } }, 'collections must be an array of opaque collection ids'],
+    [{ document: { collections: ['not opaque'] } }, 'collections[0] must be an opaque collection id']
+  ];
+  for (const [body, message] of cases) {
+    const gateway = withServer(createRecordingStorage());
+    const response = await expectStatus(gateway, '/v1/documents/ingest', { method: 'POST', body }, 400);
+    assert.equal(response.body.error.message, message);
+  }
+});
+
 test('reports an unregistered model as a caller error on coverage', async () => {
   const storage = createRecordingStorage({
     inspectEmbeddingCoverage: async () => {
@@ -477,7 +534,12 @@ test('reports an unexpected dependency failure with one sanitized trace', async 
   });
   await gateway.stop();
   assert.equal(response.status, 500);
-  assert.deepEqual(response.body, { error: { code: 'internal_error', message: 'The request failed' } });
+  assert.deepEqual(response.body, {
+    error: {
+      code: 'internal_error',
+      message: 'The gateway encountered an internal error; retry the request, and contact the operator if it persists.'
+    }
+  });
   assert.deepEqual(traces, [{ event: 'gateway_unexpected_failure', route: 'POST /v1/retrieval/query', error_class: 'Error' }]);
   assert.equal(JSON.stringify(traces).includes('invoice payload must not be logged'), false);
   assert.equal(JSON.stringify(traces).includes('private evidence'), false);
@@ -525,6 +587,21 @@ function answerableStorage() {
     }
   };
 }
+
+test('validates research requests at the public route seam', async () => {
+  const cases = [
+    [{ question: 'q', stream: true }, 'Unsupported research field: stream'],
+    [{ question: 'q', limit: 0 }, 'limit must be an integer between 1 and 100'],
+    [{ question: 'q', max_tokens: 0 }, 'max_tokens must be an integer between 1 and 8192'],
+    [{ question: 'q', embedding_model_id: '' }, 'embedding_model_id must be non-empty text'],
+    [{}, 'question must be non-empty text']
+  ];
+  for (const [body, message] of cases) {
+    const gateway = withServer(answerableStorage(), { chat: async () => 'unused' });
+    const response = await expectStatus(gateway, '/v1/research', { method: 'POST', body }, 400);
+    assert.equal(response.body.error.message, message);
+  }
+});
 
 test('answers over evidence with a derived owner and the injected chat adapter', async () => {
   const storage = answerableStorage();
@@ -695,6 +772,7 @@ test('maps a malformed provider response and an embedder failure to boundary err
   });
   const broken = await expectStatus(malformed, '/v1/answers', { method: 'POST', body: { question: 'invoice alpha' } }, 502);
   assert.equal(broken.body.error.code, 'model_failed');
+  assert.equal(broken.body.error.message, 'chat response must be valid JSON');
 
   const embedTimeout = withServer(answerableStorage(), {
     chat: async () => 'x [1].',
@@ -709,6 +787,7 @@ test('maps a malformed provider response and an embedder failure to boundary err
     504
   );
   assert.equal(timedOutEmbed.body.error.code, 'model_timeout');
+  assert.equal(timedOutEmbed.body.error.message, 'embedding request timed out');
 
   const embedFailed = withServer(answerableStorage(), {
     chat: async () => 'x [1].',
@@ -723,6 +802,7 @@ test('maps a malformed provider response and an embedder failure to boundary err
     502
   );
   assert.equal(failedEmbed.body.error.code, 'model_failed');
+  assert.equal(failedEmbed.body.error.message, 'embedding request failed with status 500');
 });
 
 test('maps a provider timeout and a provider failure to stable boundary errors', async () => {
@@ -733,6 +813,7 @@ test('maps a provider timeout and a provider failure to stable boundary errors',
   });
   const timedOut = await expectStatus(timeout, '/v1/answers', { method: 'POST', body: { question: 'where?' } }, 504);
   assert.equal(timedOut.body.error.code, 'model_timeout');
+  assert.equal(timedOut.body.error.message, 'chat request timed out');
 
   const failing = withServer(answerableStorage(), {
     chat: async () => {
@@ -741,6 +822,7 @@ test('maps a provider timeout and a provider failure to stable boundary errors',
   });
   const failed = await expectStatus(failing, '/v1/answers', { method: 'POST', body: { question: 'where?' } }, 502);
   assert.equal(failed.body.error.code, 'model_failed');
+  assert.equal(failed.body.error.message, 'chat request failed with status 429');
 });
 
 test('returns a buffered OpenAI chat completion grounded by answerQuestion', async () => {
@@ -839,6 +921,32 @@ test('does not call the model for empty chat-completions evidence and rejects un
     body: { model: 'client-model', messages: [{ role: 'user', content: 'where?' }], owner_id: 'owner-two' }
   }, 400);
   assert.equal(rejectedOwner.body.error.code, 'invalid_request');
+});
+
+test('validates chat completion requests at the public route seam', async () => {
+  const cases = [
+    [{ model: '', messages: [{ role: 'user', content: 'q' }] }, 'model must be non-empty text'],
+    [{ model: 'client', messages: [] }, 'messages must contain exactly one user message'],
+    [{ model: 'client', messages: [{ role: 'user', content: '' }] }, 'messages must contain exactly one non-empty user message'],
+    [{ model: 'client', messages: [{ role: 'user', content: 'q' }], collection_ids: ['not opaque'] }, 'collection_ids[0] must be an opaque collection id']
+  ];
+  for (const [body, message] of cases) {
+    const gateway = withServer(answerableStorage(), { chat: async () => 'unused' });
+    const response = await expectStatus(gateway, '/v1/chat/completions', { method: 'POST', body }, 400);
+    assert.equal(response.body.error.message, message);
+  }
+});
+
+test('rejects streaming when the configured provider has no streaming seam', async () => {
+  const gateway = withServer(answerableStorage(), { chat: async () => 'buffered only' });
+  const response = await expectStatus(gateway, '/v1/chat/completions', {
+    method: 'POST',
+    body: { model: 'client', messages: [{ role: 'user', content: 'question' }], stream: true }
+  }, 503);
+  assert.deepEqual(response.body.error, {
+    code: 'answers_unavailable',
+    message: 'The configured chat provider does not support streaming'
+  });
 });
 
 test('streams grounded chat completions and attaches answer metadata after citation revalidation', async () => {
@@ -953,6 +1061,7 @@ test('bounds model-backed concurrency and releases slots after success and failu
   await gateway.stop();
   assert.equal(overloaded.status, 429);
   assert.equal(overloaded.body.error.code, 'model_busy');
+  assert.equal(overloaded.body.error.message, 'The model is at capacity; retry the request shortly.');
   assert.equal(JSON.stringify(overloaded.body).includes('provider'), false);
   assert.equal(chatCalls, 1);
   assert.equal(firstResponse.status, 200);
@@ -991,6 +1100,7 @@ test('applies a fixed per-owner model budget and resets it without affecting oth
     const exhausted = await call(budgetGateway, '/v1/research', { port, method: 'POST', headers: ownerOne, body: { question: 'second' } });
     assert.equal(exhausted.status, 429);
     assert.equal(exhausted.body.error.code, 'model_busy');
+    assert.equal(exhausted.body.error.message, 'The model is at capacity; retry the request shortly.');
     assert.equal(JSON.stringify(exhausted.body).includes('provider'), false);
     assert.equal((await call(budgetGateway, '/v1/answers', { port, method: 'POST', headers: ownerTwo, body: { question: 'other owner' } })).status, 200);
     assert.equal(modelCalls, 2);
@@ -1027,6 +1137,7 @@ test('holds a model slot until a streaming response ends', { timeout: 3000 }, as
   await gateway.stop();
   assert.equal(overloaded.status, 429);
   assert.equal(overloaded.body.error.code, 'model_busy');
+  assert.equal(overloaded.body.error.message, 'The model is at capacity; retry the request shortly.');
   assert.equal(streamed.status, 200);
   assert.notEqual(afterStream.status, 429);
 });
@@ -1065,7 +1176,30 @@ test('streams empty-evidence answers without a model call and sanitizes post-hea
   });
   await earlyFailureGateway.stop();
   assert.equal(earlyFailure.status, 502);
-  assert.deepEqual(earlyFailure.body, { error: { code: 'model_failed', message: 'The model request failed' } });
+  assert.deepEqual(earlyFailure.body, {
+    error: {
+      code: 'model_failed',
+      message: 'The model request failed; retry the request, and contact the operator if it persists.'
+    }
+  });
+
+  const earlyTimeoutChat = async () => '';
+  earlyTimeoutChat.stream = async function* () {
+    throw new Error('chat request timed out');
+  };
+  const earlyTimeoutGateway = withServer(answerableStorage(), { chat: earlyTimeoutChat });
+  const earlyTimeout = await call(earlyTimeoutGateway, '/v1/chat/completions', {
+    method: 'POST',
+    body: { model: 'client-model', messages: [{ role: 'user', content: 'where?' }], stream: true }
+  });
+  await earlyTimeoutGateway.stop();
+  assert.equal(earlyTimeout.status, 504);
+  assert.deepEqual(earlyTimeout.body, {
+    error: {
+      code: 'model_timeout',
+      message: 'The model request timed out'
+    }
+  });
 
   const failingChat = async () => '';
   failingChat.stream = async function* () {
@@ -1083,6 +1217,22 @@ test('streams empty-evidence answers without a model call and sanitizes post-hea
   assert.equal(failed.body.includes('[DONE]'), false);
   assert.equal(failed.body.includes('model_failed'), true);
 
+  const timeoutChat = async () => '';
+  timeoutChat.stream = async function* () {
+    yield 'partial answer';
+    throw new Error('chat request timed out');
+  };
+  const timeoutGateway = withServer(answerableStorage(), { chat: timeoutChat });
+  const timedOut = await callText(timeoutGateway, '/v1/chat/completions', {
+    method: 'POST',
+    body: { model: 'client-model', messages: [{ role: 'user', content: 'where?' }], stream: true }
+  });
+  await timeoutGateway.stop();
+  assert.equal(timedOut.status, 200);
+  assert.equal(timedOut.body.includes('model_timeout'), true);
+  assert.equal(timedOut.body.includes('The model request timed out'), true);
+  assert.equal(timedOut.body.includes('[DONE]'), false);
+
   const brokenStorage = answerableStorage();
   brokenStorage.revalidateCitations = async () => { throw new TypeError('database path must not leak'); };
   const citationChat = async () => '';
@@ -1095,6 +1245,7 @@ test('streams empty-evidence answers without a model call and sanitizes post-hea
   await brokenGateway.stop();
   assert.equal(broken.body.includes('database path'), false);
   assert.equal(broken.body.includes('internal_error'), true);
+  assert.equal(broken.body.includes('The gateway encountered an internal error; retry the request, and contact the operator if it persists.'), true);
   assert.equal(broken.body.includes('answer_metadata'), false);
   assert.equal(broken.body.includes('[DONE]'), false);
 });
@@ -1238,6 +1389,23 @@ test('uses caller-supplied hybrid evidence for suggestions and never reaches the
     { collection_id: 'collection-hybrid', score: 0.25, segment_id: 'urn:segment:hybrid' }
   ]);
   assert.equal(embedCalls, 0);
+});
+
+test('validates collection suggestion requests at the public route seam', async () => {
+  const cases = [
+    [{ question: 'q', unsupported: true }, 'Unsupported collection suggestion field: unsupported'],
+    [{ question: '' }, 'question must be non-empty text'],
+    [{ question: 'q', mode: 'other' }, 'mode must be lexical or hybrid'],
+    [{ question: 'q', limit: 0 }, 'limit must be an integer between 1 and 20'],
+    [{ question: 'q', max_collections: 11 }, 'max_collections must be an integer between 1 and 10'],
+    [{ question: 'q', mode: 'hybrid' }, 'model_id is required for hybrid suggestions'],
+    [{ question: 'q', mode: 'hybrid', model_id: 'synthetic-3d', query_embedding: [] }, 'query_embedding must be a non-empty array of finite numbers for hybrid suggestions']
+  ];
+  for (const [body, message] of cases) {
+    const gateway = withServer(createRecordingStorage());
+    const response = await expectStatus(gateway, '/v1/collections/suggest', { method: 'POST', body }, 400);
+    assert.equal(response.body.error.message, message);
+  }
 });
 
 test('moves a document to one collection through the authenticated owner seam', async () => {

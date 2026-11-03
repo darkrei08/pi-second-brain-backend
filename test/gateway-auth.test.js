@@ -28,6 +28,7 @@ test('rejects a missing, malformed, or wrong token with one indistinguishable fa
       (error) => {
         assert.equal(error.status, 401);
         assert.equal(error.code, 'unauthorized');
+        assert.equal(error.message, 'Authentication is required; provide a valid bearer token and try again.');
         seen.add(`${error.status}:${error.code}:${error.message}`);
         return true;
       }
@@ -97,6 +98,7 @@ test('selects the owner from the presented principal token and ignores a caller 
       (error) => {
         assert.equal(error.status, 401);
         assert.equal(error.code, 'unauthorized');
+        assert.equal(error.message, 'Authentication is required; provide a valid bearer token and try again.');
         return true;
       }
     );

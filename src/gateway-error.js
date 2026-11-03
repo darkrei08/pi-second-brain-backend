@@ -16,5 +16,13 @@ export function errorPayload(error) {
     return { status: 400, body: { error: { code: 'invalid_request', message: error.message } } };
   }
   // NOTE: an unexpected failure is reported without its message so a driver error cannot leak SQL or paths.
-  return { status: 500, body: { error: { code: 'internal_error', message: 'The request failed' } } };
+  return {
+    status: 500,
+    body: {
+      error: {
+        code: 'internal_error',
+        message: 'The gateway encountered an internal error; retry the request, and contact the operator if it persists.'
+      }
+    }
+  };
 }

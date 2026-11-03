@@ -7,7 +7,7 @@ const AUTHORIZATION_PATTERN = /^Bearer (.+)$/u;
 
 function unauthorized() {
   // NOTE: a missing token and a wrong token share one response so a probe cannot learn which one it sent.
-  return new GatewayError(401, 'unauthorized', 'Authentication required');
+  return new GatewayError(401, 'unauthorized', 'Authentication is required; provide a valid bearer token and try again.');
 }
 
 function tokenMatches(expected, presented) {

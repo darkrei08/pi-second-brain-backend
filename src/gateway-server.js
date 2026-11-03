@@ -52,7 +52,7 @@ function sanitizeStreamFailure(error) {
     return new GatewayError(504, mapped.code, 'The model request timed out');
   }
   if (mapped?.code === 'model_failed') {
-    return new GatewayError(502, mapped.code, 'The model request failed');
+    return new GatewayError(502, mapped.code, 'The model request failed; retry the request, and contact the operator if it persists.');
   }
   return error;
 }
@@ -359,7 +359,7 @@ export function createGatewayServer({
     }
     const budget = owner_budgets.get(owner_id);
     if (active_model_requests >= max_model_concurrency || (budget?.requests ?? 0) >= model_requests_per_minute) {
-      throw new GatewayError(429, 'model_busy', 'Model capacity is temporarily unavailable');
+      throw new GatewayError(429, 'model_busy', 'The model is at capacity; retry the request shortly.');
     }
     active_model_requests += 1;
     if (budget === undefined) owner_budgets.set(owner_id, { window_started_at: now, requests: 1 });
@@ -781,7 +781,10 @@ export function createGatewayServer({
         if (response.headersSent) {
           const streamError = mapped instanceof GatewayError
             ? body.error
-            : { code: 'internal_error', message: 'The request failed' };
+            : {
+              code: 'internal_error',
+              message: 'The gateway encountered an internal error; retry the request, and contact the operator if it persists.'
+            };
           response.write(`data: ${JSON.stringify({ error: streamError })}\n\n`);
           response.end();
           return;
