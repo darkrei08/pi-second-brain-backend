@@ -15,6 +15,9 @@ const JSON_CONTENT_TYPE = /^application\/json(?:;|$)/iu;
 const UNAUTHENTICATED_PATHS = new Set(['/healthz', '/readyz']);
 const CHAT_COMPLETION_FIELDS = new Set(['model', 'messages', 'stream', 'collection_ids', 'embedding_model_id', 'limit', 'max_tokens']);
 const RESEARCH_FIELDS = new Set(['question', 'collection_ids', 'embedding_model_id', 'limit', 'max_tokens']);
+const COLLECTION_SUGGESTION_FIELDS = new Set(['question', 'mode', 'model_id', 'query_embedding', 'limit', 'max_collections']);
+const MAX_SUGGESTION_MATCHES = 20;
+const MAX_SUGGESTED_COLLECTIONS = 10;
 // Seam errors with a stable message that means the caller sent something unusable.
 const SEAM_FAILURES = [
   { pattern: /^embedding model is not registered$/u, status: 400, code: 'invalid_request' },
@@ -170,6 +173,63 @@ function answerMetadata(answer) {
     retrieval: answer.retrieval,
     uncertainty: answer.uncertainty
   };
+}
+
+function collectionSuggestionRequest(body) {
+  for (const key of Object.keys(body)) {
+    if (!COLLECTION_SUGGESTION_FIELDS.has(key)) {
+      throw new GatewayError(400, 'invalid_request', `Unsupported collection suggestion field: ${key}`);
+    }
+  }
+  if (typeof body.question !== 'string' || body.question.trim() === '') {
+    throw new GatewayError(400, 'invalid_request', 'question must be non-empty text');
+  }
+  const mode = body.mode ?? 'lexical';
+  if (mode !== 'lexical' && mode !== 'hybrid') {
+    throw new GatewayError(400, 'invalid_request', 'mode must be lexical or hybrid');
+  }
+  if (body.limit !== undefined && (!Number.isInteger(body.limit) || body.limit < 1 || body.limit > MAX_SUGGESTION_MATCHES)) {
+    throw new GatewayError(400, 'invalid_request', `limit must be an integer between 1 and ${MAX_SUGGESTION_MATCHES}`);
+  }
+  if (body.max_collections !== undefined && (!Number.isInteger(body.max_collections) || body.max_collections < 1 || body.max_collections > MAX_SUGGESTED_COLLECTIONS)) {
+    throw new GatewayError(400, 'invalid_request', `max_collections must be an integer between 1 and ${MAX_SUGGESTED_COLLECTIONS}`);
+  }
+  if (mode === 'hybrid') {
+    if (typeof body.model_id !== 'string' || body.model_id.trim() === '') {
+      throw new GatewayError(400, 'invalid_request', 'model_id is required for hybrid suggestions');
+    }
+    if (!Array.isArray(body.query_embedding) || body.query_embedding.length === 0
+      || body.query_embedding.some((value) => typeof value !== 'number' || !Number.isFinite(value))) {
+      throw new GatewayError(400, 'invalid_request', 'query_embedding must be a non-empty array of finite numbers for hybrid suggestions');
+    }
+  }
+  return {
+    question: body.question,
+    mode,
+    model_id: body.model_id,
+    query_embedding: body.query_embedding,
+    limit: body.limit ?? MAX_SUGGESTION_MATCHES,
+    max_collections: body.max_collections ?? MAX_SUGGESTED_COLLECTIONS
+  };
+}
+
+async function rankCollectionSuggestions(storage, matches, owner_id, max_collections, scoreField) {
+  const candidates = new Map();
+  for (const match of matches) {
+    const score = Number(match[scoreField]);
+    if (!Number.isFinite(score)) continue;
+    const collection_ids = await storage.listDocumentCollections(match.document_id, owner_id);
+    for (const collection_id of collection_ids) {
+      const candidate = { collection_id, score, segment_id: match.id };
+      const previous = candidates.get(collection_id);
+      if (previous === undefined || score > previous.score || (score === previous.score && match.id < previous.segment_id)) {
+        candidates.set(collection_id, candidate);
+      }
+    }
+  }
+  return [...candidates.values()]
+    .sort((left, right) => right.score - left.score || left.collection_id.localeCompare(right.collection_id) || left.segment_id.localeCompare(right.segment_id))
+    .slice(0, max_collections);
 }
 
 function send(response, status, payload, extraHeaders = {}) {
@@ -351,6 +411,31 @@ export function createGatewayServer({
         collection_ids
       });
       return { status: 200, body: { retrieval: describeRetrievalMode(matches, { model_id }), matches } };
+    },
+
+    'POST /v1/collections/suggest': async ({ body, owner_id }) => {
+      const request = collectionSuggestionRequest(body);
+      const matches = request.mode === 'hybrid'
+        ? await storage.searchSegmentsHybrid({
+          query: request.question,
+          query_embedding: request.query_embedding,
+          model_id: request.model_id,
+          owner_id,
+          limit: request.limit
+        })
+        : await storage.searchSegmentsLexical({
+          query: request.question,
+          owner_id,
+          limit: request.limit
+        });
+      const candidates = await rankCollectionSuggestions(
+        storage,
+        matches,
+        owner_id,
+        request.max_collections,
+        request.mode === 'hybrid' ? 'hybrid_score' : 'rank'
+      );
+      return { status: 200, body: { candidates } };
     },
 
     'POST /v1/citations/resolve': async ({ body, owner_id }) => {

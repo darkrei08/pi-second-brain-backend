@@ -1125,3 +1125,72 @@ test('keeps an unknown research collection scoped and returns unsupported eviden
   assert.deepEqual(searchInputs.map(({ collection_ids }) => collection_ids), [['unknown-collection']]);
   assert.equal(modelCalls, 0);
 });
+
+test('suggests ranked collections from retrieval evidence without calling a provider or changing scope', async () => {
+  const storage = createRecordingStorage();
+  const searchInputs = [];
+  storage.searchSegmentsLexical = async (input) => {
+    searchInputs.push(input);
+    return input.query === 'invoice'
+      ? [
+        { id: 'urn:segment:alpha', document_id: 'urn:document:alpha', rank: 0.9 },
+        { id: 'urn:segment:beta', document_id: 'urn:document:beta', rank: 0.8 },
+        { id: 'urn:segment:alpha-two', document_id: 'urn:document:alpha-two', rank: 0.7 }
+      ]
+      : [];
+  };
+  storage.listDocumentCollections = async (document_id) => {
+    if (document_id === 'urn:document:alpha') return ['collection-alpha'];
+    if (document_id === 'urn:document:beta') return ['collection-beta'];
+    return ['collection-beta'];
+  };
+  let embedCalls = 0;
+  const gateway = withServer(storage, { embed: async () => { embedCalls += 1; throw new Error('provider must not be called'); } });
+  const port = (await gateway.start({ port: 0 })).port;
+  const suggestion = await call(gateway, '/v1/collections/suggest', {
+    port,
+    method: 'POST',
+    body: { question: 'invoice', limit: 3, max_collections: 2 }
+  });
+  const unchanged = await call(gateway, '/v1/retrieval/query', {
+    port,
+    method: 'POST',
+    body: { query: 'invoice' }
+  });
+  await gateway.stop();
+
+  assert.equal(suggestion.status, 200);
+  assert.deepEqual(suggestion.body, {
+    candidates: [
+      { collection_id: 'collection-alpha', score: 0.9, segment_id: 'urn:segment:alpha' },
+      { collection_id: 'collection-beta', score: 0.8, segment_id: 'urn:segment:beta' }
+    ]
+  });
+  assert.equal(embedCalls, 0);
+  assert.equal(unchanged.status, 200);
+  assert.equal(searchInputs.at(-1).collection_ids, undefined);
+});
+
+test('uses caller-supplied hybrid evidence for suggestions and never reaches the embedder', async () => {
+  const storage = createRecordingStorage();
+  storage.searchSegmentsHybrid = async (input) => {
+    storage.calls.push({ name: 'searchSegmentsHybrid', input });
+    return [{ id: 'urn:segment:hybrid', document_id: 'urn:document:hybrid', hybrid_score: 0.25 }];
+  };
+  storage.listDocumentCollections = async () => ['collection-hybrid'];
+  let embedCalls = 0;
+  const gateway = withServer(storage, { embed: async () => { embedCalls += 1; return [[1, 0, 0]]; } });
+  const response = await call(gateway, '/v1/collections/suggest', {
+    method: 'POST',
+    body: {
+      question: 'invoice', mode: 'hybrid', model_id: 'synthetic-3d', query_embedding: [1, 0, 0]
+    }
+  });
+  await gateway.stop();
+  assert.equal(response.status, 200);
+  assert.deepEqual(response.body.candidates, [
+    { collection_id: 'collection-hybrid', score: 0.25, segment_id: 'urn:segment:hybrid' }
+  ]);
+  assert.equal(embedCalls, 0);
+});
+
