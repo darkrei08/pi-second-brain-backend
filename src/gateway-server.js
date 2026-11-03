@@ -290,17 +290,13 @@ export function createGatewayServer({
       } catch {
         throw new GatewayError(503, 'not_ready', 'Storage is not reachable');
       }
-      if (chat === undefined || answer_model === undefined) {
+      if (chat === undefined || answer_model === undefined || typeof chat.probe !== 'function') {
         throw new GatewayError(503, 'not_ready', 'Answer provider is not configured');
       }
       const checked_at = answer_provider_readiness.checked_at;
       if (checked_at === null || Date.now() - checked_at >= READINESS_CACHE_MS) {
         try {
-          await recordModelCall('chat', 'GET /readyz', null, answer_model, () => chat({
-            model_id: answer_model,
-            messages: [{ role: 'user', content: 'health check' }],
-            max_tokens: 1
-          }));
+          await chat.probe(answer_model);
           answer_provider_readiness = Object.freeze({ checked_at: Date.now(), ready: true });
         } catch {
           answer_provider_readiness = Object.freeze({ checked_at: Date.now(), ready: false });

@@ -41,6 +41,61 @@ test('posts to the chat completions endpoint with a fixed patch', async () => {
   assert.equal(calls[0].init.headers.authorization, undefined);
 });
 
+test('probes the declared model through metadata without posting a completion', async () => {
+  const calls = [];
+  const chat = createOpenAICompatibleChat({
+    base_url: 'http://127.0.0.1:11434/v1',
+    api_key: 'synthetic-key',
+    fetch: async (url, init) => {
+      calls.push({ url, init });
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return { data: [{ id: 'synthetic-chat' }] };
+        }
+      };
+    }
+  });
+  await chat.probe('synthetic-chat');
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, 'http://127.0.0.1:11434/v1/models');
+  assert.equal(calls[0].init.method, 'GET');
+  assert.equal(calls[0].init.body, undefined);
+  assert.equal(calls[0].init.headers.authorization, 'Bearer synthetic-key');
+});
+
+test('rejects a metadata probe when the model is not declared', async () => {
+  const chat = createOpenAICompatibleChat({
+    base_url: 'http://127.0.0.1:11434/v1',
+    fetch: respondWith({ data: [{ id: 'other-model' }] })
+  });
+  await assert.rejects(chat.probe('synthetic-chat'), /model is not available/);
+});
+
+test('bounds metadata probe timeout independently from the completion timeout', async () => {
+  let signal;
+  const chat = createOpenAICompatibleChat({
+    base_url: 'http://127.0.0.1:11434/v1',
+    timeout_ms: 600000,
+    fetch: async (_url, init) => {
+      signal = init.signal;
+      await new Promise((resolve, reject) => {
+        signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+      });
+    }
+  });
+  const keepAlive = setTimeout(() => {}, 3500);
+  const started = Date.now();
+  try {
+    await assert.rejects(chat.probe('synthetic-chat'), /chat readiness request timed out/);
+    assert.ok(Date.now() - started < 5000);
+    assert.equal(signal.aborted, true);
+  } finally {
+    clearTimeout(keepAlive);
+  }
+});
+
 test('allows only declared remote provider hosts and exempts loopback', async () => {
   const approved = createOpenAICompatibleChat({
     base_url: 'https://Models.Example.com./v1',

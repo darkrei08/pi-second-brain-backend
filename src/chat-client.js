@@ -1,5 +1,6 @@
 const DEFAULT_TIMEOUT_MS = 60000;
 const MAX_TIMEOUT_MS = 600000;
+const READINESS_TIMEOUT_MS = 3000;
 const MAX_COMPLETION_TOKENS = 8192;
 const LOOPBACK_HOSTS = new Set(['localhost', '[::1]', '::1', '::ffff:127.0.0.1']);
 const LOOPBACK_IPV4_PATTERN = /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/;
@@ -26,7 +27,7 @@ function isLoopbackHostname(hostname) {
     LOOPBACK_MAPPED_IPV4_PATTERN.test(normalized);
 }
 
-function resolveEndpoint(base_url, allowed_hosts = []) {
+function resolveBaseEndpoint(base_url, allowed_hosts = []) {
   requireNonEmptyText(base_url, 'base_url');
   let url;
   try {
@@ -48,7 +49,7 @@ function resolveEndpoint(base_url, allowed_hosts = []) {
   if (!isLoopbackHostname(hostname) && !allowed_hosts.some((host) => host.toLowerCase().replace(/\.$/, '') === hostname)) {
     throw new TypeError(`provider host ${hostname} is not allowed; set ANSWER_ALLOWED_HOSTS`);
   }
-  return `${url.origin}${url.pathname.replace(/\/+$/, '')}/chat/completions`;
+  return `${url.origin}${url.pathname.replace(/\/+$/, '')}`;
 }
 
 function validateMessages(messages) {
@@ -162,7 +163,9 @@ export function createOpenAICompatibleChat({ fetch = globalThis.fetch, base_url,
   if (typeof fetch !== 'function') {
     throw new TypeError('fetch must be a function');
   }
-  const endpoint = resolveEndpoint(base_url, allowed_hosts);
+  const base_endpoint = resolveBaseEndpoint(base_url, allowed_hosts);
+  const endpoint = `${base_endpoint}/chat/completions`;
+  const models_endpoint = `${base_endpoint}/models`;
   if (api_key !== undefined) {
     requireNonEmptyText(api_key, 'api_key');
     if (!PRINTABLE_ASCII_PATTERN.test(api_key)) {
@@ -210,6 +213,37 @@ export function createOpenAICompatibleChat({ fetch = globalThis.fetch, base_url,
       throw new Error('chat response must be valid JSON');
     }
     return readContent(body);
+  };
+  chat.probe = async function probe(model_id) {
+    requireNonEmptyText(model_id, 'model_id');
+    const headers = {};
+    if (api_key !== undefined) headers.authorization = `Bearer ${api_key}`;
+    let response;
+    try {
+      response = await fetch(models_endpoint, {
+        method: 'GET',
+        headers,
+        redirect: 'error',
+        signal: AbortSignal.timeout(READINESS_TIMEOUT_MS)
+      });
+    } catch (error) {
+      if (error && (error.name === 'TimeoutError' || error.name === 'AbortError')) {
+        throw new Error('chat readiness request timed out');
+      }
+      throw new Error('chat readiness request failed');
+    }
+    if (!response.ok) {
+      throw new Error(`chat readiness request failed with status ${response.status}`);
+    }
+    let body;
+    try {
+      body = await response.json();
+    } catch {
+      throw new Error('chat readiness response must be valid JSON');
+    }
+    if (!body || !Array.isArray(body.data) || !body.data.some((model) => model && model.id === model_id)) {
+      throw new Error('chat model is not available');
+    }
   };
   chat.stream = async function* stream(input) {
     const { model_id, messages, max_tokens } = validateCallInput(input);

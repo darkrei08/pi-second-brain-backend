@@ -107,14 +107,18 @@ test('serves liveness without a dependency and refuses unknown routes and method
   assert.equal(wrongMethod.headers.allow, 'GET');
 });
 
-test('reports readiness from storage and the answer provider with a bounded probe', async () => {
-  const providerCalls = [];
-  const readyGateway = withServer(createRecordingStorage(), {
-    chat: async (input) => {
-      providerCalls.push(input);
-      return 'healthy';
-    }
-  });
+test('reports readiness from storage and provider metadata without a completion or audit event', async () => {
+  const completionCalls = [];
+  const probeCalls = [];
+  const auditEvents = [];
+  const chat = async (input) => {
+    completionCalls.push(input);
+    return 'must not be called';
+  };
+  chat.probe = async (model_id) => {
+    probeCalls.push(model_id);
+  };
+  const readyGateway = withServer(createRecordingStorage(), { chat, audit: (event) => auditEvents.push(event) });
   const readyPort = (await readyGateway.start({ port: 0 })).port;
   const ready = await call(readyGateway, '/readyz', { headers: {}, port: readyPort });
   const cached = await call(readyGateway, '/readyz', { headers: {}, port: readyPort });
@@ -122,29 +126,27 @@ test('reports readiness from storage and the answer provider with a bounded prob
   assert.equal(ready.status, 200);
   assert.deepEqual(ready.body, { status: 'ready' });
   assert.equal(cached.status, 200);
-  assert.equal(providerCalls.length, 1);
-  assert.deepEqual(providerCalls[0], {
-    model_id: 'synthetic-chat',
-    messages: [{ role: 'user', content: 'health check' }],
-    max_tokens: 1
-  });
+  assert.deepEqual(probeCalls, ['synthetic-chat']);
+  assert.deepEqual(completionCalls, []);
+  assert.deepEqual(auditEvents, []);
 
-  const unreachableCalls = [];
-  const unreachable = withServer(createRecordingStorage(), {
-    chat: async () => {
-      unreachableCalls.push(true);
-      throw new Error('connect ECONNREFUSED 127.0.0.1:11434');
-    }
-  });
-  const unreachablePort = (await unreachable.start({ port: 0 })).port;
-  const refused = await call(unreachable, '/readyz', { headers: {}, port: unreachablePort });
-  const cachedRefusal = await call(unreachable, '/readyz', { headers: {}, port: unreachablePort });
-  await unreachable.stop();
+  const unreachable = async () => {
+    throw new Error('completion must not be called');
+  };
+  unreachable.probe = async () => {
+    throw new Error('connect ECONNREFUSED 127.0.0.1:11434');
+  };
+  const unreachableAudit = [];
+  const unreachableGateway = withServer(createRecordingStorage(), { chat: unreachable, audit: (event) => unreachableAudit.push(event) });
+  const unreachablePort = (await unreachableGateway.start({ port: 0 })).port;
+  const refused = await call(unreachableGateway, '/readyz', { headers: {}, port: unreachablePort });
+  const cachedRefusal = await call(unreachableGateway, '/readyz', { headers: {}, port: unreachablePort });
+  await unreachableGateway.stop();
   assert.equal(refused.status, 503);
   assert.equal(cachedRefusal.status, 503);
   assert.equal(refused.body.error.code, 'not_ready');
   assert.equal(JSON.stringify(refused.body).includes('ECONNREFUSED'), false);
-  assert.equal(unreachableCalls.length, 1);
+  assert.deepEqual(unreachableAudit, []);
 
   const failing = withServer(createRecordingStorage({
     listEmbeddingModels: async () => {
