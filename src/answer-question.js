@@ -1,4 +1,5 @@
-import { describeRetrievalMode, resolveCitations } from './index.js';
+import { describeRetrievalMode } from './retrieval-mode.js';
+import { resolveCitations } from './citation-resolver.js';
 import { OPAQUE_ID_PATTERN } from './opaque-id.js';
 
 export const INSUFFICIENT_EVIDENCE_ANSWER =
