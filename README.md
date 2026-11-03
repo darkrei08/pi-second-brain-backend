@@ -8,9 +8,9 @@ Requirements: Node.js 22+ and PostgreSQL with the `vector` extension (the CI ser
 
 ```sh
 npm ci
-DATABASE_URL=postgres://user:password@127.0.0.1:5432/second_brain npm run migrate
+DATABASE_URL=postgres://127.0.0.1:5432/second_brain npm run migrate
 npm test
-TEST_DATABASE_URL=postgres://user:password@127.0.0.1:5432/second_brain npm run test:integration
+TEST_DATABASE_URL=postgres://127.0.0.1:5432/second_brain npm run test:integration
 ```
 
 Start the gateway after configuring its required environment variables:
