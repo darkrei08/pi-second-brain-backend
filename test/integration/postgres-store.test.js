@@ -1203,6 +1203,32 @@ integrationTest('ingests a document into zero, one, or many collections of its o
   await removeCollections(ownerId);
 });
 
+integrationTest('moves a document between collections exactly once in one transaction', async () => {
+  const storage = createStorage({ pool });
+  await seedCollections(storage);
+  const documentId = collectionsUnscopedDocument.document_id;
+  await storage.moveDocumentCollection({
+    document_id: documentId,
+    owner_id: collectionsOwnerA,
+    collection_id: collectionAlpha
+  });
+  assert.deepEqual(await storage.listDocumentCollections(documentId, collectionsOwnerA), [collectionAlpha]);
+
+  await storage.moveDocumentCollection({
+    document_id: documentId,
+    owner_id: collectionsOwnerA,
+    collection_id: collectionBeta
+  });
+  assert.deepEqual(await storage.listDocumentCollections(documentId, collectionsOwnerA), [collectionBeta]);
+  const memberships = await pool.query(
+    'SELECT collection_id, count(*)::int AS count FROM document_collections WHERE document_id = $1 GROUP BY collection_id ORDER BY collection_id',
+    [documentId]
+  );
+  assert.deepEqual(memberships.rows, [{ collection_id: collectionBeta, count: 1 }]);
+  await removeCollections(collectionsOwnerA);
+  await removeCollections(collectionsOwnerB);
+});
+
 integrationTest('creates unknown collections on ingest but rejects foreign ownership', async () => {
   const storage = createStorage({ pool });
   await seedCollections(storage);

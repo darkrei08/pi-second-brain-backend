@@ -19,6 +19,7 @@ const RESEARCH_FIELDS = new Set(['question', 'collection_ids', 'embedding_model_
 const COLLECTION_SUGGESTION_FIELDS = new Set(['question', 'mode', 'model_id', 'query_embedding', 'limit', 'max_collections']);
 const DOCUMENT_COLLECTION_SUGGESTION_FIELDS = new Set(['document_id', 'max_collections']);
 const DOCUMENT_COLLECTION_CONFIRMATION_FIELDS = new Set(['document_id', 'collection_ids']);
+const DOCUMENT_COLLECTION_MOVE_FIELDS = new Set(['document_id', 'collection_id']);
 const MAX_SUGGESTION_MATCHES = 20;
 const MAX_SUGGESTED_COLLECTIONS = 10;
 // Seam errors with a stable message that means the caller sent something unusable.
@@ -249,6 +250,21 @@ function documentCollectionSuggestionRequest(body) {
     throw new GatewayError(400, 'invalid_request', `max_collections must be an integer between 1 and ${MAX_SUGGESTED_COLLECTIONS}`);
   }
   return { document_id: body.document_id, max_collections: body.max_collections ?? MAX_SUGGESTED_COLLECTIONS };
+}
+
+function documentCollectionMoveRequest(body) {
+  for (const key of Object.keys(body)) {
+    if (!DOCUMENT_COLLECTION_MOVE_FIELDS.has(key)) {
+      throw new GatewayError(400, 'invalid_request', `Unsupported document collection move field: ${key}`);
+    }
+  }
+  if (typeof body.document_id !== 'string' || !DOCUMENT_ID_PATTERN.test(body.document_id)) {
+    throw new GatewayError(400, 'invalid_request', 'document_id must be an opaque document id');
+  }
+  if (typeof body.collection_id !== 'string' || !OPAQUE_ID_PATTERN.test(body.collection_id)) {
+    throw new GatewayError(400, 'invalid_request', 'collection_id must be an opaque collection id');
+  }
+  return { document_id: body.document_id, collection_id: body.collection_id };
 }
 
 function documentCollectionConfirmationRequest(body) {
@@ -507,6 +523,15 @@ export function createGatewayServer({
         owner_id
       });
       return { status: 200, body: { document_id: request.document_id, collections } };
+    },
+
+    'POST /v1/documents/collections/move': async ({ body, owner_id }) => {
+      const request = documentCollectionMoveRequest(body);
+      await storage.moveDocumentCollection({
+        ...request,
+        owner_id
+      });
+      return { status: 200, body: request };
     },
 
     'POST /v1/citations/resolve': async ({ body, owner_id }) => {

@@ -36,6 +36,7 @@ function createRecordingStorage(overrides = {}) {
     listDocumentCollections: record('listDocumentCollections', ['synthetic-collection-alpha']),
     suggestDocumentCollections: record('suggestDocumentCollections', []),
     confirmDocumentCollections: record('confirmDocumentCollections', []),
+    moveDocumentCollection: record('moveDocumentCollection', ['synthetic-collection-beta']),
     ...overrides
   };
   return storage;
@@ -1237,6 +1238,26 @@ test('uses caller-supplied hybrid evidence for suggestions and never reaches the
     { collection_id: 'collection-hybrid', score: 0.25, segment_id: 'urn:segment:hybrid' }
   ]);
   assert.equal(embedCalls, 0);
+});
+
+test('moves a document to one collection through the authenticated owner seam', async () => {
+  const storage = createRecordingStorage();
+  const gateway = withServer(storage);
+  const response = await call(gateway, '/v1/documents/collections/move', {
+    method: 'POST',
+    body: { document_id: 'urn:document:proposal', collection_id: 'synthetic-collection-beta' }
+  });
+  await gateway.stop();
+  assert.equal(response.status, 200);
+  assert.deepEqual(response.body, {
+    document_id: 'urn:document:proposal',
+    collection_id: 'synthetic-collection-beta'
+  });
+  assert.deepEqual(storage.calls.find(({ name }) => name === 'moveDocumentCollection').input, {
+    document_id: 'urn:document:proposal',
+    owner_id: 'owner-one',
+    collection_id: 'synthetic-collection-beta'
+  });
 });
 
 test('returns a document filing proposal and requires a separate confirmation call', async () => {

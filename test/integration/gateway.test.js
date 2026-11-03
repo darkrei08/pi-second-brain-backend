@@ -480,6 +480,50 @@ test('answers with hybrid evidence and reports no uncertainty', { skip: !pool },
   }
 });
 
+test('moves document membership through the gateway and replaces the previous collection', { skip: !pool }, async () => {
+  const storage = createStorage({ pool });
+  const document = {
+    document_id: 'urn:document:gateway-move',
+    text: 'invoice alpha quarterly renewal',
+    source_label: 'gateway-move.txt',
+    source_hash: `sha256:${'a9'.repeat(32)}`,
+    lineage: { parser: 'synthetic-parser@1.0.0', model: null },
+    created_at: '2026-01-09T00:00:00Z',
+    retention: { owner_id, state: 'active' },
+    collections: [collection_id]
+  };
+  const target_collection_id = `${collection_id}-move-target`;
+  await pool.query('DELETE FROM documents WHERE owner_id = $1', [owner_id]);
+  await pool.query('DELETE FROM collections WHERE owner_id = $1', [owner_id]);
+  await storage.createCollection({ collection_id, owner_id, created_at: '2026-01-09T00:00:00Z' });
+  await storage.createCollection({ collection_id: target_collection_id, owner_id, created_at: '2026-01-09T00:00:00Z' });
+  await storage.saveDocumentAndSegments(document, segmentDocument(document, { max_segment_chars: 200 }));
+
+  const gateway = createGatewayServer({
+    storage,
+    authenticator: createAuthenticator({ token, owner_id, shell_users: {} })
+  });
+  const { url } = await gateway.start({ port: 0 });
+  try {
+    const response = await call(url, '/v1/documents/collections/move', {
+      method: 'POST',
+      body: { document_id: document.document_id, collection_id: target_collection_id }
+    });
+    assert.equal(response.status, 200, JSON.stringify(response.body));
+    assert.deepEqual(response.body, { document_id: document.document_id, collection_id: target_collection_id });
+    assert.deepEqual(await storage.listDocumentCollections(document.document_id, owner_id), [target_collection_id]);
+    const memberships = await pool.query(
+      'SELECT collection_id, count(*)::int AS count FROM document_collections WHERE document_id = $1 GROUP BY collection_id',
+      [document.document_id]
+    );
+    assert.deepEqual(memberships.rows, [{ collection_id: target_collection_id, count: 1 }]);
+  } finally {
+    await gateway.stop();
+    await pool.query('DELETE FROM documents WHERE owner_id = $1', [owner_id]);
+    await pool.query('DELETE FROM collections WHERE owner_id = $1', [owner_id]);
+  }
+});
+
 test('proposes document filing without changing membership and confirms one idempotent membership', { skip: !pool }, async () => {
   const storage = createStorage({ pool });
   const member = {

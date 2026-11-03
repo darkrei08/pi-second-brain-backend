@@ -135,6 +135,17 @@ function validateDocumentCollectionSuggestionInput(input) {
   return { document_id, owner_id, max_collections };
 }
 
+function validateDocumentCollectionMoveInput(input) {
+  requireObject(input, 'input');
+  const { document_id, owner_id, collection_id } = input;
+  if (typeof document_id !== 'string' || !DOCUMENT_ID_PATTERN.test(document_id)) {
+    throw new TypeError('document_id must be an opaque document URN');
+  }
+  requireOpaqueId(owner_id, 'owner_id');
+  requireOpaqueId(collection_id, 'collection_id');
+  return { document_id, owner_id, collection_id };
+}
+
 function validateDocumentCollectionConfirmationInput(input) {
   requireObject(input, 'input');
   const { document_id, owner_id } = input;
@@ -853,6 +864,52 @@ export function createStorage({ pool }) {
         score: Number(row.score),
         segment_id: row.segment_id
       }));
+    },
+
+    async moveDocumentCollection(input) {
+      const { document_id, owner_id, collection_id } = validateDocumentCollectionMoveInput(input);
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        const document = await client.query(`
+          SELECT owner_id
+          FROM documents
+          WHERE document_id = $1
+          FOR UPDATE
+        `, [document_id]);
+        if (document.rowCount !== 1) throw new Error('document not found for this owner');
+        if (document.rows[0].owner_id !== owner_id) throw new Error('document belongs to a different owner');
+
+        const collection = await client.query(`
+          SELECT collection_id
+          FROM collections
+          WHERE collection_id = $1
+            AND owner_id = $2
+          FOR UPDATE
+        `, [collection_id, owner_id]);
+        if (collection.rowCount !== 1) throw new Error('unknown or foreign collection for this owner');
+
+        await client.query(`
+          DELETE FROM document_collections
+          WHERE document_id = $1
+            AND owner_id = $2
+        `, [document_id, owner_id]);
+        await client.query(`
+          INSERT INTO document_collections (collection_id, document_id, owner_id)
+          VALUES ($1, $2, $3)
+        `, [collection_id, document_id, owner_id]);
+        await client.query('COMMIT');
+        return collection_id;
+      } catch (error) {
+        try {
+          await client.query('ROLLBACK');
+        } catch {
+          // Preserve the original database error.
+        }
+        throw error;
+      } finally {
+        client.release();
+      }
     },
 
     async confirmDocumentCollections(input) {
