@@ -612,6 +612,49 @@ test('records one audit event per provider call without any caller text', async 
   assert.throws(() => withServer(answerableStorage(), { audit: 'stderr' }), /audit must be a function/);
 });
 
+test('includes reported provider token usage in audit metadata and omits absent usage', async () => {
+  const reportedEvents = [];
+  const reported = withServer(answerableStorage(), {
+    audit: (event) => reportedEvents.push(event),
+    chat: async (input) => {
+      input.on_usage({ prompt_tokens: 260, completion_tokens: 39 });
+      return 'The invoice alpha is filed under the contract [1].';
+    }
+  });
+  const reportedResponse = await call(reported, '/v1/answers', {
+    method: 'POST',
+    body: { question: 'where is the invoice alpha?' }
+  });
+  await reported.stop();
+  assert.equal(reportedResponse.status, 200);
+  assert.deepEqual(reportedEvents[0], {
+    event: 'model_call',
+    kind: 'chat',
+    route: 'POST /v1/answers',
+    owner_id: 'owner-one',
+    model_id: 'synthetic-chat',
+    outcome: 'ok',
+    duration_ms: reportedEvents[0].duration_ms,
+    prompt_tokens: 260,
+    completion_tokens: 39
+  });
+  assert.equal(JSON.stringify(reportedEvents).includes('invoice alpha'), false);
+
+  const absentEvents = [];
+  const absent = withServer(answerableStorage(), {
+    audit: (event) => absentEvents.push(event),
+    chat: async () => 'The invoice alpha is filed under the contract [1].'
+  });
+  const absentResponse = await call(absent, '/v1/answers', {
+    method: 'POST',
+    body: { question: 'where is the invoice alpha?' }
+  });
+  await absent.stop();
+  assert.equal(absentResponse.status, 200);
+  assert.equal(Object.hasOwn(absentEvents[0], 'prompt_tokens'), false);
+  assert.equal(Object.hasOwn(absentEvents[0], 'completion_tokens'), false);
+});
+
 test('refuses an answer request without a configured model and without authentication', async () => {
   const unconfigured = withServer(answerableStorage(), { chat: undefined, answer_model: undefined });
   const unavailable = await expectStatus(

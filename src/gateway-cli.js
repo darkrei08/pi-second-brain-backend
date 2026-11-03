@@ -6,6 +6,7 @@ import { createOpenAICompatibleChat, createOpenAICompatibleEmbedder, createStora
 import { createAuthenticator } from './gateway-auth.js';
 import { loadGatewayConfig, parseAllowedHosts } from './gateway-config.js';
 import { createGatewayServer } from './gateway-server.js';
+import { shutdownGateway } from './gateway-shutdown.js';
 
 let config;
 try {
@@ -70,8 +71,11 @@ for (const signal of ['SIGINT', 'SIGTERM']) {
   process.on(signal, async () => {
     if (closing) return;
     closing = true;
-    await gateway.stop();
-    await pool.end();
-    process.exit(0);
+    void shutdownGateway({
+      gateway,
+      pool,
+      writeError: (message) => process.stderr.write(`gateway shutdown failed: ${message}\n`),
+      exit: (code) => process.exit(code)
+    });
   });
 }

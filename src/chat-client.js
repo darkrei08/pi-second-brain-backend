@@ -74,7 +74,20 @@ function validateCallInput(input) {
   if (!Number.isInteger(max_tokens) || max_tokens < 1 || max_tokens > MAX_COMPLETION_TOKENS) {
     throw new TypeError(`max_tokens must be an integer between 1 and ${MAX_COMPLETION_TOKENS}`);
   }
-  return { model_id: input.model_id, messages, max_tokens };
+  if (input.on_usage !== undefined && typeof input.on_usage !== 'function') {
+    throw new TypeError('on_usage must be a function when provided');
+  }
+  return { model_id: input.model_id, messages, max_tokens, on_usage: input.on_usage };
+}
+
+function readUsage(body) {
+  const usage = body?.usage;
+  if (usage === null || typeof usage !== 'object' || Array.isArray(usage)) return undefined;
+  const reported = {};
+  for (const field of ['prompt_tokens', 'completion_tokens']) {
+    if (Number.isSafeInteger(usage[field]) && usage[field] >= 0) reported[field] = usage[field];
+  }
+  return Object.keys(reported).length === 0 ? undefined : reported;
 }
 
 function readContent(body) {
@@ -92,7 +105,7 @@ function readContent(body) {
   return message.content;
 }
 
-async function* readStreamContent(response, signal) {
+async function* readStreamContent(response, signal, on_usage) {
   if (response.body === null || typeof response.body?.getReader !== 'function') {
     throw new Error('chat response stream is unavailable');
   }
@@ -133,6 +146,8 @@ async function* readStreamContent(response, signal) {
         if (payload?.error !== undefined) {
           throw new Error('chat response stream failed');
         }
+        const usage = readUsage(payload);
+        if (usage !== undefined) on_usage?.(usage);
         if (!Array.isArray(payload?.choices)) {
           throw new Error('chat response stream contains invalid choices');
         }
@@ -177,7 +192,7 @@ export function createOpenAICompatibleChat({ fetch = globalThis.fetch, base_url,
   }
 
   const chat = async function chat(input) {
-    const { model_id, messages, max_tokens } = validateCallInput(input);
+    const { model_id, messages, max_tokens, on_usage } = validateCallInput(input);
     const headers = { 'content-type': 'application/json' };
     if (api_key !== undefined) {
       headers.authorization = `Bearer ${api_key}`;
@@ -212,6 +227,8 @@ export function createOpenAICompatibleChat({ fetch = globalThis.fetch, base_url,
     } catch {
       throw new Error('chat response must be valid JSON');
     }
+    const usage = readUsage(body);
+    if (usage !== undefined) on_usage?.(usage);
     return readContent(body);
   };
   chat.probe = async function probe(model_id) {
@@ -246,7 +263,7 @@ export function createOpenAICompatibleChat({ fetch = globalThis.fetch, base_url,
     }
   };
   chat.stream = async function* stream(input) {
-    const { model_id, messages, max_tokens } = validateCallInput(input);
+    const { model_id, messages, max_tokens, on_usage } = validateCallInput(input);
     const headers = { 'content-type': 'application/json' };
     if (api_key !== undefined) headers.authorization = `Bearer ${api_key}`;
     const timeoutSignal = AbortSignal.timeout(timeout_ms);
@@ -276,7 +293,7 @@ export function createOpenAICompatibleChat({ fetch = globalThis.fetch, base_url,
     if (typeof contentType !== 'string' || !/^text\/event-stream(?:\s*;|$)/iu.test(contentType)) {
       throw new Error('chat response stream must use text/event-stream');
     }
-    yield* readStreamContent(response, signal);
+    yield* readStreamContent(response, signal, on_usage);
   };
   return chat;
 }
