@@ -12,16 +12,20 @@ const MODEL_ROUTES = new Set(['POST /v1/answers', 'POST /v1/research', 'POST /v1
 const MODEL_WINDOW_MS = 60_000;
 const READINESS_CACHE_MS = 30_000;
 const JSON_CONTENT_TYPE = /^application\/json(?:;|$)/iu;
+const DOCUMENT_ID_PATTERN = /^urn:document:[A-Za-z0-9][A-Za-z0-9._~-]*$/u;
 const UNAUTHENTICATED_PATHS = new Set(['/healthz', '/readyz']);
 const CHAT_COMPLETION_FIELDS = new Set(['model', 'messages', 'stream', 'collection_ids', 'embedding_model_id', 'limit', 'max_tokens']);
 const RESEARCH_FIELDS = new Set(['question', 'collection_ids', 'embedding_model_id', 'limit', 'max_tokens']);
 const COLLECTION_SUGGESTION_FIELDS = new Set(['question', 'mode', 'model_id', 'query_embedding', 'limit', 'max_collections']);
+const DOCUMENT_COLLECTION_SUGGESTION_FIELDS = new Set(['document_id', 'max_collections']);
+const DOCUMENT_COLLECTION_CONFIRMATION_FIELDS = new Set(['document_id', 'collection_ids']);
 const MAX_SUGGESTION_MATCHES = 20;
 const MAX_SUGGESTED_COLLECTIONS = 10;
 // Seam errors with a stable message that means the caller sent something unusable.
 const SEAM_FAILURES = [
   { pattern: /^embedding model is not registered$/u, status: 400, code: 'invalid_request' },
   { pattern: /^unknown or foreign collection for this owner$/u, status: 400, code: 'invalid_request' },
+  { pattern: /^document not found for this owner$/u, status: 404, code: 'not_found' },
   { pattern: /^document belongs to a different owner$/u, status: 409, code: 'conflict' },
   { pattern: /^chat request timed out$/u, status: 504, code: 'model_timeout' },
   { pattern: /^chat request failed/u, status: 502, code: 'model_failed' },
@@ -232,6 +236,37 @@ async function rankCollectionSuggestions(storage, matches, owner_id, max_collect
     .slice(0, max_collections);
 }
 
+function documentCollectionSuggestionRequest(body) {
+  for (const key of Object.keys(body)) {
+    if (!DOCUMENT_COLLECTION_SUGGESTION_FIELDS.has(key)) {
+      throw new GatewayError(400, 'invalid_request', `Unsupported document collection suggestion field: ${key}`);
+    }
+  }
+  if (typeof body.document_id !== 'string' || !DOCUMENT_ID_PATTERN.test(body.document_id)) {
+    throw new GatewayError(400, 'invalid_request', 'document_id must be an opaque document id');
+  }
+  if (body.max_collections !== undefined && (!Number.isInteger(body.max_collections) || body.max_collections < 1 || body.max_collections > MAX_SUGGESTED_COLLECTIONS)) {
+    throw new GatewayError(400, 'invalid_request', `max_collections must be an integer between 1 and ${MAX_SUGGESTED_COLLECTIONS}`);
+  }
+  return { document_id: body.document_id, max_collections: body.max_collections ?? MAX_SUGGESTED_COLLECTIONS };
+}
+
+function documentCollectionConfirmationRequest(body) {
+  for (const key of Object.keys(body)) {
+    if (!DOCUMENT_COLLECTION_CONFIRMATION_FIELDS.has(key)) {
+      throw new GatewayError(400, 'invalid_request', `Unsupported document collection confirmation field: ${key}`);
+    }
+  }
+  if (typeof body.document_id !== 'string' || !DOCUMENT_ID_PATTERN.test(body.document_id)) {
+    throw new GatewayError(400, 'invalid_request', 'document_id must be an opaque document id');
+  }
+  const collection_ids = optionalCollectionIds(body);
+  if (collection_ids === undefined || collection_ids.length === 0) {
+    throw new GatewayError(400, 'invalid_request', 'collection_ids must contain at least one collection id');
+  }
+  return { document_id: body.document_id, collection_ids };
+}
+
 function send(response, status, payload, extraHeaders = {}) {
   const serialized = JSON.stringify(payload);
   response.writeHead(status, {
@@ -436,6 +471,24 @@ export function createGatewayServer({
         request.mode === 'hybrid' ? 'hybrid_score' : 'rank'
       );
       return { status: 200, body: { candidates } };
+    },
+
+    'POST /v1/documents/collections/suggest': async ({ body, owner_id }) => {
+      const request = documentCollectionSuggestionRequest(body);
+      const candidates = await storage.suggestDocumentCollections({
+        ...request,
+        owner_id
+      });
+      return { status: 200, body: { document_id: request.document_id, candidates } };
+    },
+
+    'POST /v1/documents/collections/confirm': async ({ body, owner_id }) => {
+      const request = documentCollectionConfirmationRequest(body);
+      const collections = await storage.confirmDocumentCollections({
+        ...request,
+        owner_id
+      });
+      return { status: 200, body: { document_id: request.document_id, collections } };
     },
 
     'POST /v1/citations/resolve': async ({ body, owner_id }) => {

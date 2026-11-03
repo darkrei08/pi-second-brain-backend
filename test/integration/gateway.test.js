@@ -479,3 +479,60 @@ test('answers with hybrid evidence and reports no uncertainty', { skip: !pool },
     await pool.query('DELETE FROM embedding_models WHERE model_id = $1', [model_id]);
   }
 });
+
+test('proposes document filing without changing membership and confirms one idempotent membership', { skip: !pool }, async () => {
+  const storage = createStorage({ pool });
+  const member = {
+    document_id: 'urn:document:gateway-proposal-member',
+    text: 'invoice alpha quarterly renewal',
+    source_label: 'gateway-proposal-member.txt',
+    source_hash: `sha256:${'a7'.repeat(32)}`,
+    lineage: { parser: 'synthetic-parser@1.0.0', model: null },
+    created_at: '2026-01-09T00:00:00Z',
+    retention: { owner_id, state: 'active' },
+    collections: [collection_id]
+  };
+  const target = {
+    document_id: 'urn:document:gateway-proposal-target',
+    text: 'invoice alpha renewal',
+    source_label: 'gateway-proposal-target.txt',
+    source_hash: `sha256:${'a8'.repeat(32)}`,
+    lineage: { parser: 'synthetic-parser@1.0.0', model: null },
+    created_at: '2026-01-09T00:00:00Z',
+    retention: { owner_id, state: 'active' }
+  };
+  await pool.query('DELETE FROM documents WHERE owner_id = $1', [owner_id]);
+  await pool.query('DELETE FROM collections WHERE owner_id = $1', [owner_id]);
+  await storage.createCollection({ collection_id, owner_id, created_at: '2026-01-09T00:00:00Z' });
+  await storage.saveDocumentAndSegments(member, segmentDocument(member, { max_segment_chars: 200 }));
+  await storage.saveDocumentAndSegments(target, segmentDocument(target, { max_segment_chars: 200 }));
+
+  const gateway = createGatewayServer({
+    storage,
+    authenticator: createAuthenticator({ token, owner_id, shell_users: {} })
+  });
+  const { url } = await gateway.start({ port: 0 });
+  try {
+    const proposal = await call(url, '/v1/documents/collections/suggest', {
+      method: 'POST',
+      body: { document_id: target.document_id }
+    });
+    assert.equal(proposal.status, 200, JSON.stringify(proposal.body));
+    assert.equal(proposal.body.document_id, target.document_id);
+    assert.equal(proposal.body.candidates[0].collection_id, collection_id);
+    assert.ok(proposal.body.candidates[0].score > 0);
+    assert.deepEqual(await storage.listDocumentCollections(target.document_id, owner_id), []);
+
+    const confirmation = {
+      method: 'POST',
+      body: { document_id: target.document_id, collection_ids: [collection_id, collection_id] }
+    };
+    assert.equal((await call(url, '/v1/documents/collections/confirm', confirmation)).status, 200);
+    assert.equal((await call(url, '/v1/documents/collections/confirm', confirmation)).status, 200);
+    assert.deepEqual(await storage.listDocumentCollections(target.document_id, owner_id), [collection_id]);
+  } finally {
+    await gateway.stop();
+    await pool.query('DELETE FROM documents WHERE owner_id = $1', [owner_id]);
+    await pool.query('DELETE FROM collections WHERE owner_id = $1', [owner_id]);
+  }
+});

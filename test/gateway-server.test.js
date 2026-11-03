@@ -34,6 +34,8 @@ function createRecordingStorage(overrides = {}) {
     searchSegmentsLexicalAnswerable: record('searchSegmentsLexicalAnswerable', []),
     saveDocumentAndSegments: record('saveDocumentAndSegments', undefined),
     listDocumentCollections: record('listDocumentCollections', ['synthetic-collection-alpha']),
+    suggestDocumentCollections: record('suggestDocumentCollections', []),
+    confirmDocumentCollections: record('confirmDocumentCollections', []),
     ...overrides
   };
   return storage;
@@ -1194,3 +1196,46 @@ test('uses caller-supplied hybrid evidence for suggestions and never reaches the
   assert.equal(embedCalls, 0);
 });
 
+test('returns a document filing proposal and requires a separate confirmation call', async () => {
+  const storage = createRecordingStorage({
+    suggestDocumentCollections: async (input) => {
+      storage.calls.push({ name: 'suggestDocumentCollections', input });
+      return [{ collection_id: 'collection-alpha', score: 0.4, segment_id: 'urn:segment:evidence' }];
+    },
+    confirmDocumentCollections: async (input) => {
+      storage.calls.push({ name: 'confirmDocumentCollections', input });
+      return ['collection-alpha'];
+    }
+  });
+  const gateway = withServer(storage);
+  const port = (await gateway.start({ port: 0 })).port;
+  const proposal = await call(gateway, '/v1/documents/collections/suggest', {
+    port,
+    method: 'POST',
+    body: { document_id: 'urn:document:proposal' }
+  });
+  assert.equal(proposal.status, 200);
+  assert.deepEqual(proposal.body, {
+    document_id: 'urn:document:proposal',
+    candidates: [{ collection_id: 'collection-alpha', score: 0.4, segment_id: 'urn:segment:evidence' }]
+  });
+  assert.equal(storage.calls.some(({ name }) => name === 'confirmDocumentCollections'), false);
+
+  const confirmed = await call(gateway, '/v1/documents/collections/confirm', {
+    port,
+    method: 'POST',
+    body: { document_id: 'urn:document:proposal', collection_ids: ['collection-alpha'] }
+  });
+  await gateway.stop();
+  assert.equal(confirmed.status, 200);
+  assert.deepEqual(confirmed.body, {
+    document_id: 'urn:document:proposal',
+    collections: ['collection-alpha']
+  });
+  const confirmation = storage.calls.find(({ name }) => name === 'confirmDocumentCollections');
+  assert.deepEqual(confirmation.input, {
+    document_id: 'urn:document:proposal',
+    owner_id: 'owner-one',
+    collection_ids: ['collection-alpha']
+  });
+});

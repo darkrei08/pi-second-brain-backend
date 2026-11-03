@@ -1,6 +1,7 @@
 import { OPAQUE_ID_PATTERN } from './opaque-id.js';
 
 const DEFAULT_SEARCH_LIMIT = 20;
+const MAX_COLLECTION_SUGGESTIONS = 10;
 const MAX_VECTOR_DIMENSIONS = 16000;
 const DOCUMENT_ID_PATTERN = /^urn:document:[A-Za-z0-9][A-Za-z0-9._~-]*$/;
 const HASH_PATTERN = /^sha256:[0-9a-f]{64}$/;
@@ -119,6 +120,33 @@ function validateDocumentCollections(collections) {
     if (!unique.includes(collection_id)) unique.push(collection_id);
   }
   return unique;
+}
+
+function validateDocumentCollectionSuggestionInput(input) {
+  requireObject(input, 'input');
+  const { document_id, owner_id, max_collections = MAX_COLLECTION_SUGGESTIONS } = input;
+  if (typeof document_id !== 'string' || !DOCUMENT_ID_PATTERN.test(document_id)) {
+    throw new TypeError('document_id must be an opaque document URN');
+  }
+  requireOpaqueId(owner_id, 'owner_id');
+  if (!Number.isInteger(max_collections) || max_collections < 1 || max_collections > MAX_COLLECTION_SUGGESTIONS) {
+    throw new TypeError(`max_collections must be an integer between 1 and ${MAX_COLLECTION_SUGGESTIONS}`);
+  }
+  return { document_id, owner_id, max_collections };
+}
+
+function validateDocumentCollectionConfirmationInput(input) {
+  requireObject(input, 'input');
+  const { document_id, owner_id } = input;
+  if (typeof document_id !== 'string' || !DOCUMENT_ID_PATTERN.test(document_id)) {
+    throw new TypeError('document_id must be an opaque document URN');
+  }
+  requireOpaqueId(owner_id, 'owner_id');
+  const collection_ids = validateCollectionIds(input.collection_ids);
+  if (collection_ids === null || collection_ids.length === 0) {
+    throw new TypeError('collection_ids must contain at least one collection id');
+  }
+  return { document_id, owner_id, collection_ids };
 }
 
 function validateEmbeddingModelInput(input) {
@@ -771,6 +799,111 @@ export function createStorage({ pool }) {
         ORDER BY collection_id
       `, [document_id, owner_id]);
       return rows.map((row) => row.collection_id);
+    },
+
+    async suggestDocumentCollections(input) {
+      const { document_id, owner_id, max_collections } = validateDocumentCollectionSuggestionInput(input);
+      const { rows } = await pool.query(`
+        WITH source AS (
+          SELECT d.document_id
+          FROM documents AS d
+          WHERE d.document_id = $1
+            AND d.owner_id = $2
+            AND d.retention_state = 'active'
+        ),
+        source_segments AS (
+          SELECT s.text AS source_text
+          FROM segments AS s
+          JOIN source ON source.document_id = s.document_id
+          ORDER BY s.segment_index
+          LIMIT 3
+        ),
+        matches AS (
+          SELECT dc.collection_id,
+                 s.id AS segment_id,
+                 ts_rank_cd(s.search_vector, plainto_tsquery('simple', source_segments.source_text)) AS score
+          FROM source
+          CROSS JOIN source_segments
+          JOIN segments AS s ON s.document_id <> source.document_id
+          JOIN documents AS d ON d.document_id = s.document_id
+          JOIN document_collections AS dc
+            ON dc.document_id = d.document_id
+           AND dc.owner_id = d.owner_id
+          WHERE source_segments.source_text <> ''
+            AND d.owner_id = $2
+            AND d.retention_state = 'active'
+            AND s.search_vector @@ plainto_tsquery('simple', source_segments.source_text)
+        ),
+        ranked AS (
+          SELECT collection_id, segment_id, score,
+                 row_number() OVER (
+                   PARTITION BY collection_id
+                   ORDER BY score DESC, segment_id
+                 ) AS candidate_rank
+          FROM matches
+        )
+        SELECT collection_id, segment_id, score
+        FROM ranked
+        WHERE candidate_rank = 1
+        ORDER BY score DESC, collection_id, segment_id
+        LIMIT $3::integer
+      `, [document_id, owner_id, max_collections]);
+      return rows.map((row) => ({
+        collection_id: row.collection_id,
+        score: Number(row.score),
+        segment_id: row.segment_id
+      }));
+    },
+
+    async confirmDocumentCollections(input) {
+      const { document_id, owner_id, collection_ids } = validateDocumentCollectionConfirmationInput(input);
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        const document = await client.query(`
+          SELECT owner_id
+          FROM documents
+          WHERE document_id = $1
+          FOR UPDATE
+        `, [document_id]);
+        if (document.rowCount !== 1) throw new Error('document not found for this owner');
+        if (document.rows[0].owner_id !== owner_id) throw new Error('document belongs to a different owner');
+
+        const collections = await client.query(`
+          SELECT collection_id
+          FROM collections
+          WHERE owner_id = $2
+            AND collection_id = ANY($1::text[])
+          FOR UPDATE
+        `, [collection_ids, owner_id]);
+        if (collections.rowCount !== collection_ids.length) {
+          throw new Error('unknown or foreign collection for this owner');
+        }
+        await client.query(`
+          INSERT INTO document_collections (collection_id, document_id, owner_id)
+          SELECT declared.collection_id, $2, $3
+          FROM unnest($1::text[]) AS declared(collection_id)
+          ON CONFLICT (collection_id, document_id) DO NOTHING
+        `, [collection_ids, document_id, owner_id]);
+        const stored = await client.query(`
+          SELECT collection_id
+          FROM document_collections
+          WHERE document_id = $1
+            AND owner_id = $2
+          ORDER BY collection_id
+        `, [document_id, owner_id]);
+        await client.query('COMMIT');
+        return stored.rows.map((row) => row.collection_id);
+      } catch (error) {
+        try {
+          await client.query('ROLLBACK');
+        } catch {
+          // Preserve the original database error.
+        }
+        throw error;
+      } finally {
+        client.release();
+      }
     },
 
     async searchSegmentsSemantic({ query_embedding, model_id, owner_id, limit = DEFAULT_SEARCH_LIMIT, collection_ids }) {
